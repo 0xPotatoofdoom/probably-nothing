@@ -1,56 +1,253 @@
-"""Obsidian vault exporter."""
+"""
+Obsidian Vault Exporter — Modified Karpathy Method
+Two-author architecture: agent-authored findings + human-promotable synthesis
+"""
 import zipfile, json, os, tempfile
 from pathlib import Path
 from datetime import datetime
 
+CLAUDE_MD = """# CLAUDE.md — Probably Nothing Vault
+
+## The Two-Author Rule
+- Files with `author: agent` may be updated, extended, or contradicted by future runs
+- Files with `author: human` are READ ONLY. Never modify, never overwrite.
+- When a new run contradicts an agent-authored file, set `stale: true` and add a contradiction note. Do not delete.
+
+## Vault Operations
+- `/research [angle]` — spin up agents across a new angle (contrarian, historical, edge-case focused)
+- `/ingest [source]` — process a new source (URL, Solidity file, audit report)
+- `/query [question]` — read indexes first, drill into articles, produce cited synthesis
+- `/lint` — check for broken citations, stale markers, orphan pages
+- `/export [type]` — generate audit brief, security report, or PR description from wiki content
+
+## Folder Rules
+- sources/ — immutable. Never write here.
+- wiki/concepts/ — abstract patterns that apply across hooks
+- wiki/entities/ — specific hook instances, variants, agents
+- wiki/synthesis/ — cross-cutting conclusions. Human voice lives here.
+- generations/ — historical record of the evolutionary search
+
+## Compounding Protocol
+After each re-run, review wiki/synthesis/recommendations.md.
+If a recommendation represents your own conclusion, change `author: agent` to `author: human`.
+That finding is now yours forever.
+"""
+
+def frontmatter(author: str, confidence: float, run_id: str, citations: list = None, contradicts: list = None) -> str:
+    return f"""---
+author: {author}
+confidence: {confidence:.4f}
+run_id: {run_id}
+citations:
+{chr(10).join(f'  - {c}' for c in (citations or []))}
+contradicts: {json.dumps(contradicts or [])}
+stale: false
+---
+
+"""
+
 class VaultExporter:
-    async def export(self, results: list, findings: list, github_url: str) -> str:
+    async def export(self, results: list, findings: list, github_url: str, run_id: str = None) -> str:
+        if not run_id:
+            run_id = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+
         out_dir = Path("/tmp/probably-nothing-vaults")
         out_dir.mkdir(exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-        vault_name = f"vault-{ts}"
+        vault_name = f"vault-{run_id}"
         vault_path = out_dir / vault_name
         vault_path.mkdir(exist_ok=True)
 
-        # README
         best = results[0] if results else {}
-        (vault_path / "README.md").write_text(f"""# Probably Nothing — Audit Report
-**Hook:** {github_url}
-**Date:** {datetime.now().isoformat()}
-**Best Score:** {best.get('score', 0):.4f}
-**Total Findings:** {len(findings)}
+        best_score = best.get("score", 0)
 
-## Summary
-{chr(10).join(f'- {f}' for f in findings[:20])}
-""")
+        # --- sources/ (immutable raw inputs) ---
+        sources_dir = vault_path / "sources"
+        sources_dir.mkdir()
+        if best.get("source"):
+            (sources_dir / "hook-source.sol").write_text(best["source"])
+        (sources_dir / "run-metadata.json").write_text(json.dumps({
+            "run_id": run_id,
+            "github_url": github_url,
+            "timestamp": datetime.now().isoformat(),
+            "total_findings": len(findings),
+            "best_score": best_score,
+            "variants_tested": len(results)
+        }, indent=2))
 
-        # Agent reports
-        agents_dir = vault_path / "agents"
+        # --- wiki/concepts/ ---
+        concepts_dir = vault_path / "wiki" / "concepts"
+        concepts_dir.mkdir(parents=True)
+
+        gas_findings = [f for f in findings if "gas" in f.get("text", "").lower() or "Gas" in f.get("text", "")]
+        mev_findings = [f for f in findings if "mev" in f.get("text", "").lower() or "MEV" in f.get("text", "") or "sandwich" in f.get("text", "").lower()]
+
+        (concepts_dir / "gas-optimization.md").write_text(
+            frontmatter("agent", best_score, run_id, citations=["sources/run-metadata.json"]) +
+            f"# Gas Optimization Findings\n\n" +
+            "\n".join(f"- {f.get('text', f)}" for f in gas_findings) or "- No gas anomalies detected\n"
+        )
+        (concepts_dir / "mev-resistance.md").write_text(
+            frontmatter("agent", best_score, run_id, citations=["sources/run-metadata.json"]) +
+            f"# MEV Resistance Findings\n\n" +
+            "\n".join(f"- {f.get('text', f)}" for f in mev_findings) or "- No MEV vulnerabilities detected\n"
+        )
+        (concepts_dir / "hook-permissions.md").write_text(
+            frontmatter("agent", best_score, run_id) +
+            "# Hook Permission Analysis\n\nPermission flags identified during static analysis.\n"
+        )
+
+        # --- wiki/entities/ ---
+        entities_dir = vault_path / "wiki" / "entities"
+        entities_dir.mkdir(parents=True)
+
+        hook_name = github_url.rstrip("/").split("/")[-1]
+        (entities_dir / f"{hook_name}.md").write_text(
+            frontmatter("agent", best_score, run_id,
+                citations=["sources/hook-source.sol", "sources/run-metadata.json"]) +
+            f"# {hook_name}\n\n**Source:** {github_url}\n**Best Score:** {best_score:.4f}\n**Findings:** {len(findings)}\n\n" +
+            "## Key Findings\n" +
+            "\n".join(f"- {f.get('text', f)}" for f in findings[:20])
+        )
+
+        # Per-agent entity files
+        agents_dir = entities_dir / "agents"
         agents_dir.mkdir()
         agent_findings = {}
-        for r in results:
-            aid = r.get("agent_id", "unknown")
-            agent_findings.setdefault(aid, []).extend(r.get("findings", []))
-        for aid, afindings in agent_findings.items():
-            (agents_dir / f"{aid}.md").write_text(f"""# {aid}
-## Findings
-{chr(10).join(f'- {f}' for f in afindings)}
-## Score
-{next((r['score'] for r in results if r.get('agent_id') == aid), 'N/A')}
-""")
+        for f in findings:
+            aid = f.get("agent_id", "unknown") if isinstance(f, dict) else "unknown"
+            agent_findings.setdefault(aid, []).append(f)
 
-        # Best variant
+        agent_files = []
+        for aid, afindings in agent_findings.items():
+            fname = f"{aid}.md"
+            agent_score = next((r["score"] for r in results if r.get("agent_id") == aid), best_score)
+            (agents_dir / fname).write_text(
+                frontmatter("agent", agent_score, run_id,
+                    citations=[f"sources/run-metadata.json"]) +
+                f"# Agent: {aid}\n\n**Score:** {agent_score:.4f}\n\n## Findings\n" +
+                "\n".join(f"- {f.get('text', f) if isinstance(f, dict) else f}" for f in afindings)
+            )
+            agent_files.append(f"entities/agents/{fname}")
+
+        # Variants
+        variants_dir = entities_dir / "variants"
+        variants_dir.mkdir()
+        for i, r in enumerate(results[:10]):  # top 10
+            (variants_dir / f"variant-{i+1:03d}.md").write_text(
+                frontmatter("agent", r.get("score", 0), run_id,
+                    citations=["sources/run-metadata.json"]) +
+                f"# Variant {i+1}\n\n**Score:** {r.get('score', 0):.4f}\n\n## Findings\n" +
+                "\n".join(f"- {f}" for f in r.get("findings", []))
+            )
+
+        # --- wiki/synthesis/ (where human promotion happens) ---
+        synthesis_dir = vault_path / "wiki" / "synthesis"
+        synthesis_dir.mkdir()
+
+        all_finding_texts = [f.get("text", str(f)) if isinstance(f, dict) else str(f) for f in findings]
+
+        (synthesis_dir / "overall-score.md").write_text(
+            frontmatter("agent", best_score, run_id,
+                citations=["sources/run-metadata.json"] + agent_files[:3]) +
+            f"# Overall Score: {best_score:.4f}\n\n" +
+            f"**Total findings:** {len(findings)}\n"
+            f"**Variants tested:** {len(results)}\n"
+            f"**Top finding:** {all_finding_texts[0] if all_finding_texts else 'None'}\n\n"
+            "## Score Breakdown\n"
+            "- Gas efficiency (40%): see wiki/concepts/gas-optimization.md\n"
+            "- MEV resistance (30%): see wiki/concepts/mev-resistance.md\n"
+            "- Liquidity quality (20%): data in agents/lp-deployer.md\n"
+            "- Code simplicity (10%): data in sources/hook-source.sol\n"
+        )
+
+        (synthesis_dir / "recommendations.md").write_text(
+            frontmatter("agent", best_score, run_id,
+                citations=["wiki/synthesis/overall-score.md"]) +
+            "# Recommendations\n\n"
+            "> Review this file. For any recommendation that represents YOUR conclusion, "
+            "change `author: agent` to `author: human` in the frontmatter. "
+            "That finding is now yours and will never be overwritten by future runs.\n\n"
+            "## Agent Recommendations\n\n" +
+            "\n".join(f"- {t}" for t in all_finding_texts[:10])
+        )
+
+        # --- generations/ ---
+        gen_dir = vault_path / "generations"
+        gen_dir.mkdir()
+        (gen_dir / "gen-001.md").write_text(
+            frontmatter("agent", best_score, run_id) +
+            f"# Generation 1\n\n**Best score:** {best_score:.4f}\n**Variants:** {len(results)}\n\n" +
+            "## Survivors\n" +
+            "\n".join(f"- Score {r.get('score', 0):.4f}: {r.get('agent_id', 'unknown')}" for r in results[:3])
+        )
+
+        # --- best-variant/ ---
         best_dir = vault_path / "best-variant"
         best_dir.mkdir()
         if best.get("source"):
             (best_dir / "Hook.sol").write_text(best["source"])
 
-        # Obsidian config
+        # --- CLAUDE.md ---
+        (vault_path / "CLAUDE.md").write_text(CLAUDE_MD)
+
+        # --- README ---
+        (vault_path / "README.md").write_text(
+            frontmatter("agent", best_score, run_id) +
+            f"# Probably Nothing — Audit Vault\n\n"
+            f"**Hook:** {github_url}\n"
+            f"**Run:** {run_id}\n"
+            f"**Best Score:** {best_score:.4f}\n"
+            f"**Total Findings:** {len(findings)}\n\n"
+            "## Structure\n"
+            "- `sources/` — immutable raw inputs\n"
+            "- `wiki/concepts/` — abstract patterns\n"
+            "- `wiki/entities/` — hook + variant profiles\n"
+            "- `wiki/synthesis/` — conclusions (promote to `author: human` after review)\n"
+            "- `generations/` — evolutionary history\n"
+            "- `best-variant/` — highest-scoring Hook.sol\n"
+            "- `CLAUDE.md` — operating instructions for future runs\n\n"
+            "## Next Steps\n"
+            "1. Open in Obsidian for graph view\n"
+            "2. Review `wiki/synthesis/recommendations.md`\n"
+            "3. Promote your conclusions: change `author: agent` → `author: human`\n"
+            "4. Re-run Probably Nothing to extend the knowledge base\n"
+        )
+
+        # --- .obsidian/ ---
         obs_dir = vault_path / ".obsidian"
         obs_dir.mkdir()
-        (obs_dir / "app.json").write_text(json.dumps({"legacyEditor": False, "livePreview": True}))
+        (obs_dir / "app.json").write_text(json.dumps({
+            "legacyEditor": False,
+            "livePreview": True,
+            "defaultViewMode": "preview"
+        }, indent=2))
+        (obs_dir / "graph.json").write_text(json.dumps({
+            "collapse-filter": False,
+            "search": "",
+            "showTags": True,
+            "showAttachments": False,
+            "hideUnresolved": False,
+            "showOrphans": True,
+            "collapse-color-groups": False,
+            "colorGroups": [
+                {"query": "author:agent", "color": {"a": 1, "rgb": 14671839}},
+                {"query": "author:human", "color": {"a": 1, "rgb": 16498611}}
+            ],
+            "collapse-display": False,
+            "showArrow": True,
+            "textFadeMultiplier": 0,
+            "nodeSizeMultiplier": 1,
+            "lineSizeMultiplier": 1,
+            "collapse-forces": False,
+            "centerStrength": 0.518713248970312,
+            "repelStrength": 10,
+            "linkStrength": 1,
+            "linkDistance": 30,
+            "scale": 1,
+            "close": False
+        }, indent=2))
 
-        # Zip it
+        # Zip
         zip_path = out_dir / f"{vault_name}.zip"
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             for file in vault_path.rglob("*"):
