@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+
+# Env / secrets
+.env
+
+# Run artefacts
+out/
+
+# Foundry scratch
+backend/foundry_workspace/out/
+backend/foundry_workspace/cache/

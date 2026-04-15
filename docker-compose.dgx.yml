@@ -1,0 +1,22 @@
+# DGX Spark overlay.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.dgx.yml up --build
+#
+# Assumes Ollama is running on the host at :11434 with qwen2.5-coder:latest pulled.
+# Backend is pinned to 32G so a 70B-class coder model can share the box comfortably.
+services:
+  backend:
+    environment:
+      - PN_LLM_BACKEND=ollama
+      - PN_LLM_MODEL=${PN_LLM_MODEL:-qwen2.5-coder:latest}
+      - PN_LLM_ENDPOINT=${PN_LLM_ENDPOINT:-http://host.docker.internal:11434}
+      - PN_WALL_BUDGET=${PN_WALL_BUDGET:-300}
+      - PN_MAX_CONCURRENCY=${PN_MAX_CONCURRENCY:-12}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    deploy:
+      resources:
+        limits:
+          memory: 32G
+    mem_limit: 32g

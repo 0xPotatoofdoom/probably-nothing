@@ -5,6 +5,7 @@ Two-author architecture: agent-authored findings + human-promotable synthesis
 import zipfile, json, os, tempfile
 from pathlib import Path
 from datetime import datetime
+from typing import Optional
 
 CLAUDE_MD = """# CLAUDE.md — Probably Nothing Vault
 
@@ -46,13 +47,70 @@ stale: false
 
 """
 
+import hashlib
+import re
+
+
+def _slug_for_url(github_url: str) -> str:
+    return hashlib.sha256(github_url.encode()).hexdigest()[:16]
+
+
+_SCENARIO_FM = re.compile(
+    r"^---\n(.*?)\n---\n(.*)$", re.DOTALL
+)
+
+
 class VaultExporter:
-    async def export(self, results: list, findings: list, github_url: str, run_id: str = None) -> str:
+    # ── Re-run continuity (Milestone D) ──
+    #
+    # Vaults are written under `PN_VAULT_DIR/vault-<timestamp>/`. For a given
+    # hook URL we also maintain `PN_VAULT_DIR/by-url/<sha>/` with symlinks to
+    # every historical run of that URL. When a new run starts we scan the most
+    # recent vault for `author: human` scenarios and lift them into the new
+    # run so humans' promoted work carries across reruns.
+    def load_human_scenarios(self, github_url: str) -> list:
+        root = Path(os.getenv("PN_VAULT_DIR", "/tmp/probably-nothing-vaults"))
+        link_dir = root / "by-url" / _slug_for_url(github_url)
+        if not link_dir.exists():
+            return []
+        # Most recent first
+        vaults = sorted(link_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+        picked: list = []
+        seen: set = set()
+        for v in vaults:
+            sdir = v / "wiki" / "scenarios"
+            if not sdir.exists():
+                continue
+            for f in sdir.glob("*.md"):
+                try:
+                    text = f.read_text()
+                except Exception:
+                    continue
+                m = _SCENARIO_FM.match(text)
+                if not m:
+                    continue
+                frontmatter_block, body = m.group(1), m.group(2)
+                if "author: human" not in frontmatter_block:
+                    continue
+                # Extract solidity from ```solidity fences in the body.
+                fence = re.search(r"```solidity\s*(.*?)```", body, re.DOTALL | re.IGNORECASE)
+                if not fence:
+                    continue
+                source = fence.group(1).strip()
+                key = hashlib.sha256(source.encode()).hexdigest()
+                if key in seen:
+                    continue
+                seen.add(key)
+                picked.append({"source": source, "source_file": str(f)})
+        return picked
+
+    async def export(self, results: list, findings: list, github_url: str,
+                     scenarios: Optional[list] = None, run_id: str = None) -> str:
         if not run_id:
             run_id = datetime.now().strftime("%Y-%m-%d-%H%M%S")
 
-        out_dir = Path("/tmp/probably-nothing-vaults")
-        out_dir.mkdir(exist_ok=True)
+        out_dir = Path(os.getenv("PN_VAULT_DIR", "/tmp/probably-nothing-vaults"))
+        out_dir.mkdir(parents=True, exist_ok=True)
         vault_name = f"vault-{run_id}"
         vault_path = out_dir / vault_name
         vault_path.mkdir(exist_ok=True)
@@ -181,6 +239,34 @@ class VaultExporter:
             "\n".join(f"- Score {r.get('score', 0):.4f}: {r.get('agent_id', 'unknown')}" for r in results[:3])
         )
 
+        # --- wiki/scenarios/ (Milestone D) ---
+        # Every scenario the pool touched — LLM-authored, seed, or human-promoted — lands
+        # here as a standalone .md file with a ```solidity fence. Authors can change
+        # `author: agent` → `author: human` to make a scenario survive future re-runs.
+        if scenarios:
+            scen_dir = vault_path / "wiki" / "scenarios"
+            scen_dir.mkdir(parents=True, exist_ok=True)
+            for s in scenarios:
+                author = "human" if getattr(s, "proposer", None) == "human" else "agent"
+                informativeness = getattr(s, "informativeness", float("inf"))
+                samples = len(getattr(s, "gas_samples", []) or [])
+                body = (
+                    frontmatter(author, best_score, run_id,
+                                citations=["sources/hook-source.sol"]) +
+                    f"# {s.contract_name}\n\n"
+                    f"**Proposer:** {s.proposer}\n"
+                    f"**Generation created:** {s.gen_created}\n"
+                    f"**Samples:** {samples}\n"
+                    f"**Informativeness (gas variance):** "
+                    f"{'∞' if informativeness == float('inf') else f'{informativeness:.1f}'}\n"
+                    f"**Failure rate:** {s.failure_rate:.2%}\n\n"
+                    "## Source\n"
+                    "```solidity\n"
+                    f"{s.source}\n"
+                    "```\n"
+                )
+                (scen_dir / f"{s.contract_name}.md").write_text(body)
+
         # --- best-variant/ ---
         best_dir = vault_path / "best-variant"
         best_dir.mkdir()
@@ -246,6 +332,17 @@ class VaultExporter:
             "scale": 1,
             "close": False
         }, indent=2))
+
+        # --- by-url index so future re-runs can find this vault ---
+        link_dir = out_dir / "by-url" / _slug_for_url(github_url)
+        link_dir.mkdir(parents=True, exist_ok=True)
+        link_target = link_dir / vault_name
+        try:
+            if not link_target.exists():
+                link_target.symlink_to(vault_path.resolve(), target_is_directory=True)
+        except OSError:
+            # Filesystems without symlink support (rare) fall back to a pointer file.
+            link_target.with_suffix(".txt").write_text(str(vault_path.resolve()))
 
         # Zip
         zip_path = out_dir / f"{vault_name}.zip"

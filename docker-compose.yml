@@ -2,6 +2,7 @@ version: '3.8'
 services:
   backend:
     build: ./backend
+    command: ["serve"]
     ports:
       - "8000:8000"
     volumes:

@@ -18,7 +18,10 @@ async def websocket_endpoint(websocket: WebSocket):
     payload = json.loads(data)
     github_url = payload["url"]
     num_agents = payload.get("num_agents", 6)
-    async for update in evaluator.analyze(github_url, num_agents=num_agents):
+    skill_md = payload.get("skill_md")
+    async for update in evaluator.analyze(
+        github_url, num_agents=num_agents, skill_md=skill_md
+    ):
         await websocket.send_json(update)
     await websocket.close()
 
