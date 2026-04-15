@@ -28,7 +28,12 @@ class HookMutator:
         fee_matches = re.findall(r'\b(100|500|3000|10000)\b', source)
         if fee_matches:
             params["fee_tier"] = int(fee_matches[0])
-        for m in re.finditer(r'(?:uint\d*|int\d*)\s+(?:constant\s+|immutable\s+|public\s+|private\s+|internal\s+)*(\w+)\s*=\s*(\d+)', source):
+        # Only extract plain integer literals — skip floats (0.001) and ether/gwei values.
+        for m in re.finditer(
+            r'(?:uint\d*|int\d*)\s+(?:constant\s+|immutable\s+|public\s+|private\s+|internal\s+)*'
+            r'(\w+)\s*=\s*(\d+)(?![0-9a-fA-Fx_.\s]*(?:ether|gwei|wei|e\d))',
+            source,
+        ):
             params[m.group(1)] = int(m.group(2))
         for m in re.finditer(r'bool\s+(?:public\s+|private\s+|internal\s+|constant\s+)*(\w+)\s*=\s*(true|false)', source):
             params[m.group(1)] = m.group(2) == "true"
@@ -100,7 +105,12 @@ class HookMutator:
                 if new_val == val:
                     new_val = val + rng.choice([-1, 1]) * max(1, val // 10)
                     new_val = max(0, new_val)
-                variant = variant.replace(f"= {val}", f"= {new_val}", 1)
+                # Use regex to avoid mangling hex literals (0x...), decimals (0.001),
+                # or underscore-separated numbers. Require a clean terminator after the value.
+                pat = re.compile(
+                    r'(=\s*)' + re.escape(str(val)) + r'(?![0-9a-fA-Fx_.])'
+                )
+                variant = pat.sub(rf'\g<1>{new_val}', variant, count=1)
         return variant
 
     @staticmethod

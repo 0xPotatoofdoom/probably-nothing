@@ -102,6 +102,9 @@ def _pretty(event: dict):
         return _c("94", f"+ scenario  {event['contract']:<34} (by {author}, gen {event['gen']})")
     if t == "scenario_pruned":
         return _c("90", f"- scenario  {event['scenario_id']}  (low informativeness)")
+    if t == "scenario_rejected":
+        reason = event.get("reason", "unknown")
+        return _c("90", f"✗ scenario  rejected: {reason[:100]}")
     if t == "complete":
         scen = event.get("scenarios_active", 0)
         return _c(

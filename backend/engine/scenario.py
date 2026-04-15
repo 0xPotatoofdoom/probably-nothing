@@ -14,7 +14,6 @@ deprioritised; ones that find regressions compound.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import os
 import re
 import subprocess
@@ -34,45 +33,105 @@ V4_PRIMER = """\
 # V4 scenario-author primer
 
 You are authoring a Foundry test contract that probes a Uniswap V4 hook.
+Study the WORKING EXAMPLE below and follow its structure exactly.
 
-**Base class** — `PNBase` (imported as `../base/PNBase.t.sol`) gives you:
-  - `hook` — the deployed hook under test
-  - `poolKey` — an initialised pool using this hook at fee=3000, tickSpacing=60
-  - `currency0`, `currency1` — two funded test tokens (assigned in lexical order)
-  - `doSwap(int256 amountSpecified, bool zeroForOne) returns (BalanceDelta)`
-       negative amountSpecified = exact-input, positive = exact-output
-  - `doSwapWithHookData(amount, zeroForOne, bytes hookData)`
-  - `doAddLiquidity(int24 tickLower, int24 tickUpper, int256 liquidityDelta)`
-  - `doRemoveLiquidity(int24 tickLower, int24 tickUpper, int256 liquidityDelta)`
-  - `sandwich(int256 victimAmount, bool zeroForOne, int256 attackerAmount)`
+═══ WORKING EXAMPLE (copy this structure) ═══
 
-**Imports already wired** (use these exact remapped paths):
-  - `forge-std/Test.sol` (Test, assertEq, assertLt, vm.expectRevert, etc.)
-  - `@uniswap/v4-core/src/types/BalanceDelta.sol`
-  - `@uniswap/v4-core/src/types/PoolKey.sol`
-  - `@uniswap/v4-core/src/libraries/TickMath.sol`
-  - `@uniswap/v4-core/src/libraries/Hooks.sol`
-  - `@uniswap/v4-core/src/types/Currency.sol`
-  - `@uniswap/v4-core/test/utils/Constants.sol` (SQRT_PRICE_1_1, etc.)
-  - `@openzeppelin/uniswap-hooks/src/base/BaseHook.sol` (only if you need to reference BaseHook)
+```solidity
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.26;
 
-**Hard rules**:
-  - Output MUST be a single complete Solidity contract in one ```solidity fenced block.
-  - The contract MUST inherit `PNBase` and MUST NOT override `setUp()` unless
-    calling `super.setUp()` first.
-  - Every test function MUST start with `test_` (Foundry convention).
-  - Do NOT redeclare the hook, poolKey, or currencies.
-  - Keep each test focused on ONE behaviour so gas readings are diagnostic.
+import {PNBase} from "../base/PNBase.t.sol";
+import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 
-**Encouraged novelty**:
-  - Routing: exact-in / exact-out boundary conditions, near-zero swaps, swaps
-    that consume the whole range, swaps across tick boundaries.
-  - LP: range-crossing liquidity, mint-burn-mint, fee accrual during sandwich.
-  - MEV: multi-block sandwich, JIT provision at the sandwich tick, back-run
-    through a second pool.
-  - Edge cases: reentrant callbacks, malformed hookData, integer wrap, zero
-    liquidity swaps.
-  - Hook permissions: deliberate misuse (calling unauthorised hook functions).
+contract Scenario_WorkingExample is PNBase {
+    // test a swap and assert direction is correct
+    function test_ExactInput_0For1_outputPositive() public {
+        BalanceDelta delta = doSwap(-1 ether, true);
+        assertLt(int256(delta.amount0()), 0, "spent token0");
+        assertGt(int256(delta.amount1()), 0, "received token1");
+    }
+
+    // test liquidity round-trip produces no net loss
+    function test_AddRemove_NoNetLoss() public {
+        uint256 tokenId = doAddLiquidity(-60, 60, 1 ether);
+        doRemoveLiquidity(tokenId, 1 ether);
+    }
+
+    // test hook survives a basic sandwich
+    function test_Sandwich_Survives() public {
+        sandwich(-0.5 ether, true, -0.1 ether);
+    }
+
+    // test near-zero swap does not revert
+    function test_TinySwap_NoRevert() public {
+        doSwap(-1000, true);
+    }
+}
+```
+
+═══ APPROVED IMPORTS (use ONLY these — no others) ═══
+
+```
+import {PNBase} from "../base/PNBase.t.sol";
+import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
+import {Constants} from "@uniswap/v4-core/test/utils/Constants.sol";
+```
+
+Do NOT import anything else. PNBase already re-exports: hook, poolKey, currency0,
+currency1, poolManager, positionManager, swapRouter, TICK_SPACING, FEE.
+
+═══ AVAILABLE HELPERS (from PNBase) ═══
+
+  doSwap(int256 amount, bool zeroForOne) returns (BalanceDelta)
+    — negative amount = exact-input, positive = exact-output
+    — zeroForOne=true means selling token0 to buy token1
+
+  doSwapWithHookData(int256 amount, bool zeroForOne, bytes memory hookData) returns (BalanceDelta)
+
+  doAddLiquidity(int24 lower, int24 upper, uint128 liquidity) returns (uint256 tokenId)
+    — tick values must be multiples of TICK_SPACING (60)
+    — e.g. lower=-120, upper=120  or  lower=-600, upper=600
+
+  doRemoveLiquidity(uint256 tokenId, uint128 liquidity)
+
+  sandwich(int256 victimAmount, bool zeroForOne, int256 attackerAmount)
+    — runs: front-run, victim swap, back-run in one call
+
+═══ HARD RULES ═══
+
+  1. Exactly ONE ```solidity fenced block per scenario. No prose between blocks.
+  2. Contract name MUST start with `Scenario_` (e.g. `Scenario_JIT_LP`).
+  3. Contract MUST inherit `PNBase`. Do NOT override `setUp()`.
+  4. Every test function MUST start with `test_`.
+  5. Do NOT redeclare hook, poolKey, currency0, currency1, or any PNBase variable.
+  6. ONLY use imports from the APPROVED list above.
+  7. Tick arguments to doAddLiquidity must be multiples of 60.
+
+═══ SCENARIO IDEAS (pick angles the working example does NOT cover) ═══
+
+  Routing edge cases:
+  - Swap that would move price across a tick boundary (large amount, e.g. 50 ether)
+  - Exact-output swap (positive amountSpecified, e.g. doSwap(1 ether, true))
+  - Sequential swaps in opposite directions checking price impact symmetry
+
+  LP stress:
+  - Narrow range: doAddLiquidity(-60, 60, 10 ether) then swap through it
+  - Wide range: doAddLiquidity(-6000, 6000, 1 ether)
+  - JIT: add liquidity, swap, remove liquidity in one test — measure fee capture
+
+  MEV / ordering:
+  - Multi-swap sandwich with larger front-run
+  - Repeated sandwiches checking hook state monotonicity
+
+  Hook behaviour:
+  - doSwapWithHookData passing abi.encode(uint256(0)) or abi.encode(address(this))
+  - vm.expectRevert() if the hook is known to gate certain inputs
+
+  Gas regression:
+  - Large swap vs small swap — assert gas < some reasonable threshold
+    (use gasleft() before/after: uint256 g = gasleft(); doSwap(...); assertLt(g - gasleft(), 300_000))
 """
 
 
@@ -199,22 +258,29 @@ class ScenarioProposer:
         recent_findings: List[str],
         skill_md: Optional[str] = None,
         timeout: float = 120.0,
-    ) -> List[Scenario]:
-        """Propose up to `count` new scenarios. Compile-gated; only valid ones returned."""
+    ) -> tuple[List[Scenario], List[str]]:
+        """Propose up to `count` new scenarios. Compile-gated.
+
+        Returns (accepted, rejection_reasons) so callers can surface failures.
+        """
         accepted: List[Scenario] = []
+        rejections: List[str] = []
         # Single LLM call is cheapest; we ask for `count` scenarios at once and split them.
         prompt = self._build_prompt(hook_source, count, recent_findings, skill_md)
         raw = await self.llm.complete(prompt, timeout=timeout)
         if not raw:
-            return []
+            return [], []
         for source in _split_scenarios(raw):
             name = _extract_contract_name(source)
             if not name:
+                rejections.append("no contract name found")
                 continue
             if name in {s.contract_name for s in self.pool.all()}:
+                rejections.append(f"{name}: duplicate")
                 continue
             ok, reason = await self._compile_gate(name, source)
             if not ok:
+                rejections.append(f"{name}: {reason}")
                 continue
             scenario = Scenario(
                 scenario_id=f"llm::{name}",
@@ -226,7 +292,7 @@ class ScenarioProposer:
             )
             self.pool.add(scenario)
             accepted.append(scenario)
-        return accepted
+        return accepted, rejections
 
     async def _compile_gate(self, name: str, source: str) -> tuple[bool, str]:
         """Write the scenario, run `forge build --match-path` against it, roll back on failure."""
@@ -275,13 +341,18 @@ class ScenarioProposer:
         return (
             f"{V4_PRIMER}\n\n"
             f"{skill_block}"
-            f"**Hook under test** (src/Hook.sol):\n```solidity\n{hook_source}\n```\n\n"
-            f"**Recent findings from the autoresearch loop:**\n{findings_block}\n\n"
+            f"═══ HOOK UNDER TEST (src/Hook.sol) ═══\n\n"
+            f"```solidity\n{hook_source}\n```\n\n"
+            f"═══ RECENT FINDINGS ═══\n{findings_block}\n\n"
             f"{existing_block}\n\n"
-            f"Propose {count} NEW scenarios. Each must be a complete contract inheriting `PNBase`.\n"
-            f"Each contract MUST have a unique name starting with `Scenario_` followed by a short\n"
-            f"descriptive suffix (e.g. `Scenario_NearZeroSwap`, `Scenario_JIT_Sandwich`).\n"
-            f"Output each contract in its own ```solidity fenced block. No commentary between blocks."
+            f"═══ YOUR TASK ═══\n\n"
+            f"Propose {count} NEW test scenarios. Requirements:\n"
+            f"  - Each is a COMPLETE Solidity contract in its own ```solidity fenced block\n"
+            f"  - Contract name starts with `Scenario_` and is unique\n"
+            f"  - Inherits PNBase, uses only APPROVED imports, no setUp() override\n"
+            f"  - Tests probe the hook above from angles NOT already covered by existing scenarios\n"
+            f"  - NEVER import anything outside the approved list — it will fail to compile\n\n"
+            f"Output {count} ```solidity blocks, nothing else."
         )
 
 

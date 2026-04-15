@@ -89,8 +89,8 @@ class FoundryHarness:
     def _sync(self, source: str, agent: dict, scenarios: list) -> dict:
         hook_path = self.workspace / "src" / "Hook.sol"
         hook_path.write_text(source)
-        # Flags written per-variant so HookMiner lines up with the new bytecode.
-        self._write_flags(self._parse_flags(source))
+        # Flags + ctor pattern written per-variant so HookMiner lines up with new bytecode.
+        self._write_flags(self._parse_flags(source), self._detect_ctor_pattern(source))
 
         match_expr = _forge_match(scenarios)
         # Note: `--gas-report` replaces forge's --json output with a gas table —
@@ -168,13 +168,45 @@ class FoundryHarness:
                 flags |= bit
         return flags
 
-    def _write_flags(self, flags: int) -> None:
+    def _detect_ctor_pattern(self, source: str) -> int:
+        """
+        Detect constructor signature to pick the right CTOR_PATTERN.
+        Returns:
+          0 — constructor(IPoolManager)                      (standard)
+          1 — constructor(IPoolManager, address ...)         (+ owner/address arg)
+          2 — constructor(IPoolManager, address, uint24 ...) (+ owner + fee)
+        Falls back to 0 (standard) if constructor is unrecognised or absent.
+        """
+        m = re.search(r'constructor\s*\(([^)]*)\)', source)
+        if not m:
+            return 0
+        args = [a.strip() for a in m.group(1).split(",") if a.strip()]
+        # Check first arg is IPoolManager (standard) or something else entirely.
+        if not args or "IPoolManager" not in args[0]:
+            # Non-standard first arg — we can't auto-deploy, fall back to pattern 0
+            # and let the test fail gracefully rather than providing garbage args.
+            return 0
+        if len(args) == 1:
+            return 0
+        if len(args) >= 3 and any("uint" in a for a in args[2:3]):
+            return 2
+        if len(args) >= 2 and any("address" in a for a in args[1:2]):
+            return 1
+        return 0
+
+    def _write_flags(self, flags: int, ctor_pattern: int = 0) -> None:
         cfg = self.workspace / "test" / "base" / "HookConfig.sol"
         cfg.write_text(
             "// SPDX-License-Identifier: MIT\n"
             "pragma solidity ^0.8.26;\n\n"
             "library HookConfig {\n"
             f"    uint160 internal constant FLAGS = uint160({flags});\n"
+            f"    uint8 internal constant CTOR_PATTERN = {ctor_pattern};\n\n"
+            "    function ctorArgs(address poolManager) internal pure returns (bytes memory) {\n"
+            "        if (CTOR_PATTERN == 1) return abi.encode(poolManager, address(0));\n"
+            "        if (CTOR_PATTERN == 2) return abi.encode(poolManager, address(0), uint24(3000));\n"
+            "        return abi.encode(poolManager);\n"
+            "    }\n"
             "}\n"
         )
 

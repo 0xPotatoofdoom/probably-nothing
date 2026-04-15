@@ -91,7 +91,7 @@ class HookEvaluator:
 
                 if harness.mode == "foundry" and self.llm.backend != "mock":
                     yield {"type": "status", "message": f"Seeding scenario pool — proposing {SEED_SCENARIO_COUNT} scenarios..."}
-                    seed = await proposer.propose_batch(
+                    seed, seed_rejects = await proposer.propose_batch(
                         hook_source, count=SEED_SCENARIO_COUNT, gen=0,
                         recent_findings=[], skill_md=skill_md,
                         timeout=min(180.0, max(5.0, deadline - time.monotonic())),
@@ -99,7 +99,9 @@ class HookEvaluator:
                     for s in seed:
                         yield {"type": "scenario_added", "scenario_id": s.scenario_id,
                                "contract": s.contract_name, "proposer": s.proposer, "gen": 0}
-                    yield {"type": "status", "message": f"Scenario pool seeded: {len(pool.active())} active."}
+                    for r in seed_rejects:
+                        yield {"type": "scenario_rejected", "reason": r}
+                    yield {"type": "status", "message": f"Scenario pool seeded: {len(pool.active())} active ({len(seed_rejects)} rejected)."}
 
             # Spawn variant agents (visual + role assignment).
             agent_roles = self._assign_roles(num_agents)
@@ -225,7 +227,7 @@ class HookEvaluator:
                     recent_texts = [f["text"] for f in all_findings[-40:]]
                     yield {"type": "status",
                            "message": f"Proposing {PER_GEN_SCENARIO_COUNT} scenarios for gen {generation + 1}..."}
-                    new_scenarios = await proposer.propose_batch(
+                    new_scenarios, new_rejects = await proposer.propose_batch(
                         best_source, count=PER_GEN_SCENARIO_COUNT, gen=generation,
                         recent_findings=recent_texts, skill_md=skill_md,
                         timeout=min(120.0, max(5.0, deadline - time.monotonic() - 10)),
@@ -233,6 +235,8 @@ class HookEvaluator:
                     for s in new_scenarios:
                         yield {"type": "scenario_added", "scenario_id": s.scenario_id,
                                "contract": s.contract_name, "proposer": s.proposer, "gen": generation}
+                    for r in new_rejects:
+                        yield {"type": "scenario_rejected", "reason": r}
                     dropped = pool.prune(keep_top_k=MAX_ACTIVE_SCENARIOS)
                     for sid in dropped:
                         yield {"type": "scenario_pruned", "scenario_id": sid}
