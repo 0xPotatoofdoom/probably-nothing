@@ -574,23 +574,26 @@ class ScenarioProposer:
 
     @staticmethod
     def _preprocess_source(source: str) -> str:
-        """Auto-fix common missing imports before compilation.
+        """Auto-fix common trivial issues before compilation.
 
-        If the source uses a type that requires an import but doesn't have it,
-        inject the import. This avoids burning a full LLM fix pass on trivially
-        fixable issues.
+        1. Replace Unicode curly quotes with straight quotes (Error 8936).
+        2. Auto-inject known missing imports (Error 7920 for BalanceDelta/Hooks).
+        These avoid burning a full LLM fix pass on easily fixable issues.
         """
-        # Map of type name → import line
+        # 1. Replace curly/smart quotes that LLMs sometimes emit
+        source = (source
+                  .replace('\u201c', '"').replace('\u201d', '"')   # " "
+                  .replace('\u2018', "'").replace('\u2019', "'")   # ' '
+                  .replace('\u2032', "'").replace('\u2033', '"'))  # ′ ″
+
+        # 2. Auto-inject missing imports
         _AUTO_IMPORTS = {
             "BalanceDelta": 'import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";',
             "Hooks": 'import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";',
         }
         for type_name, import_line in _AUTO_IMPORTS.items():
-            # Check if the type is used but not yet imported
             if type_name in source and import_line not in source:
-                # Check it's actually used as a type (not just in a comment or string)
                 if re.search(r'\b' + type_name + r'\b', source):
-                    # Insert after the last existing import line
                     import_re = re.compile(r'^import\s+.*$', re.MULTILINE)
                     matches = list(import_re.finditer(source))
                     if matches:
