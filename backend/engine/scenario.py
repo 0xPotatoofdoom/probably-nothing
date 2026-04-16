@@ -661,6 +661,24 @@ class ScenarioProposer:
         #    LLMs sometimes write hook.setDepegState{value: 0}(...) which always fails.
         source = re.sub(r'\{value:\s*[^}]+\}', '', source)
 
+        # 2b. Replace hook.fn(non-empty-args) with a comment + 0 placeholder.
+        #     All multi-arg hook calls are NOT CALLABLE; replacing them avoids 9553/7576
+        #     while keeping zero-arg calls like hook.owner() or hook.totalProtectedVolume().
+        #     Single-arg calls (e.g. hook.protectedVolume(poolId)) are OK — keep those.
+        #     We only strip calls with 2+ args (contain a comma).
+        def _strip_multi_arg_hook_call(m: re.Match) -> str:
+            fn_name = m.group(1)
+            args = m.group(2)
+            # Keep single-arg calls (no comma) — they may be valid view getters
+            if ',' not in args:
+                return m.group(0)
+            return f"/* hook.{fn_name}(...) — NOT CALLABLE, removed */ 0"
+        source = re.sub(
+            r'\bhook\.(\w+)\s*\(([^)\n]*\S[^)\n]*)\)',
+            _strip_multi_arg_hook_call,
+            source,
+        )
+
         # 3. Auto-inject missing imports
         _AUTO_IMPORTS = {
             "BalanceDelta": 'import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";',
