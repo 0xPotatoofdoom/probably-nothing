@@ -122,7 +122,9 @@ V4_PRIMER_RULES = """\
      seedTokenId — these are already in PNBase.
   6. ONLY use imports from the APPROVED list above. No other imports.
   7. Tick arguments to doAddLiquidity MUST be multiples of 60.
-  8. doSwap amount is always treated as exact-input uint128 — do not pass 0.
+  8. doSwap first arg is int256. Use NEGATIVE values for exact-input swaps:
+     `doSwap(-1 ether, true)` ✓   `doSwap(1 ether, true)` ✗ (wrong sign)
+     Do NOT cast to uint128/uint256 — pass plain int256 literals.
   9. Do NOT call poolManager, positionManager, or swapRouter directly — use
      the helper functions defined in PNBase.
  10. The hook is deployed as `Hook` (renamed from its original name). To call
@@ -428,6 +430,18 @@ class ScenarioProposer:
                     if "function " in ln and not ln.strip().startswith("//")]
             pnbase_sig_block = "PNBase functions available:\n" + "\n".join(sigs[:30]) + "\n\n"
 
+        # Build error-specific hints
+        hints = []
+        if "9553" in error or "Invalid type for argument" in error:
+            hints.append("HINT: 'Invalid type for argument' — check argument types match signatures exactly. "
+                         "doSwap takes int256 (not uint128/uint256). doAddLiquidity ticks are int24.")
+        if "7920" in error or "Identifier not found" in error:
+            hints.append("HINT: 'Identifier not found' — replace any unknown identifier with a PNBase helper "
+                         "or remove the offending line entirely.")
+        if "6275" in error or "not found" in error.lower():
+            hints.append("HINT: Missing import — remove the import and use PNBase helpers instead.")
+        hint_block = "\n".join(hints) + "\n\n" if hints else ""
+
         prompt = (
             f"Fix this Solidity compiler error. Output ONLY the corrected ```solidity block.\n\n"
             f"Contract name must remain: `{name}`\n"
@@ -437,11 +451,10 @@ class ScenarioProposer:
             f'      import {{BalanceDelta}} from "@uniswap/v4-core/src/types/BalanceDelta.sol";\n'
             f'      import {{TickMath}} from "@uniswap/v4-core/src/libraries/TickMath.sol";\n'
             f'      import {{Constants}} from "@uniswap/v4-core/test/utils/Constants.sol";\n'
-            f"  - Call hook methods via `hook.method()` — the contract is named `Hook`.\n"
-            f"    Remove any import of the original contract name (e.g. SentinelPegHook).\n"
-            f"  - Use PNBase helpers: doSwap, doAddLiquidity, doRemoveLiquidity, sandwich.\n"
+            f"  - Use PNBase helpers (EXACT signatures below).\n"
             f"    Never call poolManager/positionManager/swapRouter directly.\n\n"
             f"{pnbase_sig_block}"
+            f"{hint_block}"
             f"Compiler error:\n```\n{error}\n```\n\n"
             f"Broken source:\n```solidity\n{source}\n```\n\n"
             f"Fixed source:"
@@ -479,16 +492,19 @@ class ScenarioProposer:
             err_text = r.stderr or r.stdout or ""
             err_lines = err_text.splitlines()
             # Collect meaningful error lines — skip forge noise, capture actual errors
-            _NOISE = {"Compiler run failed", "nightly build", "Warning: Failed to get git"}
+            _NOISE_STRS = {"Compiler run failed", "nightly build",
+                           "Warning: Failed to get git",
+                           "PNBase.t.sol",  # noise from warning about PNBase:79
+                           "forge-std/"}    # noise from forge-std warnings
             detail_lines = [
                 ln.strip() for ln in err_lines
                 if ("Error" in ln or "-->" in ln)
-                and not any(n in ln for n in _NOISE)
+                and not any(n in ln for n in _NOISE_STRS)
             ]
             if not detail_lines:
-                # Fall back to first non-blank, non-warning line
+                # Fall back to first non-blank, non-noise line
                 detail_lines = [ln.strip() for ln in err_lines
-                                 if ln.strip() and not any(n in ln for n in _NOISE)][:2]
+                                 if ln.strip() and not any(n in ln for n in _NOISE_STRS)][:2]
             summary = "; ".join(detail_lines[:4]) if detail_lines else "compile failed"
             return False, summary[:400]
         except Exception as e:
