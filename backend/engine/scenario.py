@@ -105,9 +105,10 @@ import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {Constants} from "@uniswap/v4-core/test/utils/Constants.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 ```
 
-Do NOT import anything else — not IPoolManager, not PoolKey, not IHooks, nothing.
+Do NOT import anything else — not IPoolManager, not PoolKey, not Currency, nothing.
 Everything you need is already inherited from PNBase.
 """
 
@@ -143,14 +144,15 @@ V4_PRIMER_RULES = """\
      `tokenId`, `gasUsed` instead.
  13. pragma solidity MUST be exactly `^0.8.26`. Do NOT write `^0.826` or any
      other variation — that will fail to compile.
- 14. To read swap output without importing BalanceDelta, call `.amount0()` or
-     `.amount1()` inline on the return value:
-       int128 out = doSwap(-1 ether, true).amount1();   ✓
-     OR import BalanceDelta explicitly if you need a named variable:
-       import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
-       BalanceDelta d = doSwap(-1 ether, true);  ✓
-     Do NOT declare a BalanceDelta variable without its import — that is a
-     compile error.
+ 14. doSwap() returns BalanceDelta — NOT int128, NOT uint256, NOT an int256.
+     WRONG: int128 x = doSwap(-1 ether, true);        ← Error 9574, won't compile
+     RIGHT: int128 x = doSwap(-1 ether, true).amount1();  ← inline .amount1()
+     RIGHT: BalanceDelta d = doSwap(-1 ether, true);  ← named var (import required)
+
+     To convert int128 amounts to uint256 you need TWO casts:
+     WRONG: uint256(delta.amount1())                  ← Error 9640, int128→uint256
+     RIGHT: uint256(int256(delta.amount1()))           ← for signed values
+     RIGHT: uint256(uint128(-delta.amount0()))         ← absolute value of negative
 
 ═══ WORKING EXAMPLE ═══
 
@@ -163,10 +165,12 @@ import {PNBase} from "../base/PNBase.t.sol";
 contract Scenario_WorkingExample is PNBase {
     function test_ExactInput_0For1_outputPositive() public {
         // Read amounts inline — no BalanceDelta import needed
-        int128 spent = doSwap(-1 ether, true).amount0();
-        int128 received = doSwap(-1 ether, true).amount1();
+        int128 spent = doSwap(-1 ether, true).amount0();    // int128, negative
+        int128 received = doSwap(-1 ether, true).amount1(); // int128, positive
         assertLt(int256(spent), 0, "spent token0");
         assertGt(int256(received), 0, "received token1");
+        // To compare as uint256: need TWO casts
+        uint256 absOut = uint256(int256(received));  // int128→int256→uint256 ✓
     }
 
     function test_AddRemove_NoNetLoss() public {
@@ -221,9 +225,18 @@ _HOOK_CALL_WARNING = """\
     Any call like hook.setDepegState(...) or hook.registerPool(...) will fail.
     These functions are present for reading WHAT the hook does — not for calling.
 
-  WRONG (Error 9553/9640 — Currency ≠ address):
-    address s = currency0;       ← Currency is NOT implicitly address
+  WRONG (Error 9574/9640 — doSwap returns BalanceDelta, not int128):
+    int128 x = doSwap(-1 ether, true);  ← Error 9574
+    uint256 y = uint256(delta.amount1()); ← Error 9640 (int128 needs two casts)
+  RIGHT:
+    int128 x = doSwap(-1 ether, true).amount1();           ← inline works
+    uint256 y = uint256(int256(doSwap(-1e18, true).amount1())); ← two casts
+
+  WRONG (Error 9640 — Currency ≠ address):
+    address s = currency0;          ← Currency is NOT implicitly address
     address s = address(currency0); ← also invalid (Error 9640)
+  RIGHT (if you must compare to an address):
+    address s = Currency.unwrap(currency0);   ← correct explicit unwrap
 
   RIGHT — test behavior indirectly, no hook calls with args:
     doSwap(-1 ether, true);                         ← tests the hook implicitly
@@ -537,6 +550,14 @@ class ScenarioProposer:
         if "9553" in error or "Invalid type for argument" in error:
             hints.append("HINT: 'Invalid type for argument' — check argument types match signatures exactly. "
                          "doSwap takes int256 (not uint128/uint256). doAddLiquidity ticks are int24.")
+        if "9574" in error or "not implicitly convertible" in error:
+            hints.append("HINT: 'not implicitly convertible' — doSwap() returns BalanceDelta, NOT int128. "
+                         "Use inline: int128 x = doSwap(-1 ether, true).amount1(); "
+                         "Never assign doSwap() directly to int128.")
+        if "9640" in error or "Explicit type conversion not allowed" in error:
+            hints.append("HINT: 'Explicit type conversion not allowed' — two common causes: "
+                         "(1) address(currency0) is forbidden — use Currency.unwrap(currency0) instead; "
+                         "(2) uint256(int128_value) is forbidden — use uint256(int256(int128_value)) instead.")
         if "7920" in error or "Identifier not found" in error:
             hints.append("HINT: 'Identifier not found' — replace any unknown identifier with a PNBase helper "
                          "or remove the offending line entirely.")
@@ -590,6 +611,7 @@ class ScenarioProposer:
         _AUTO_IMPORTS = {
             "BalanceDelta": 'import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";',
             "Hooks": 'import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";',
+            "IHooks": 'import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";',
         }
         for type_name, import_line in _AUTO_IMPORTS.items():
             if type_name in source and import_line not in source:
