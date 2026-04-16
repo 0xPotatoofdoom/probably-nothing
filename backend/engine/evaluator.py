@@ -38,8 +38,10 @@ SKILL_MD_CAP_BYTES = 20 * 1024
 SEED_RING_SIZE = 32
 
 # Scenario generation controls
-SEED_SCENARIO_COUNT = int(os.getenv("PN_SEED_SCENARIOS", "20"))
-PER_GEN_SCENARIO_COUNT = int(os.getenv("PN_PER_GEN_SCENARIOS", "8"))
+# Kept small: each LLM call asks for BATCH_SIZE scenarios at a time so the
+# model can actually complete all of them within the num_predict budget.
+SEED_SCENARIO_COUNT = int(os.getenv("PN_SEED_SCENARIOS", "8"))
+PER_GEN_SCENARIO_COUNT = int(os.getenv("PN_PER_GEN_SCENARIOS", "4"))
 MAX_ACTIVE_SCENARIOS = int(os.getenv("PN_MAX_SCENARIOS", "128"))
 
 
@@ -246,9 +248,11 @@ class HookEvaluator:
                 # Detect population collapse: all variants scored identically — parametric
                 # mutations produced no differentiation, no point running more gens.
                 score_spread = max(x["score"] for x in scored) - min(x["score"] for x in scored)
-                if score_spread < 0.001:
+                # Stagnation: increment once per gen if population collapsed OR no improvement
+                if score_spread < 0.001 or improvement < 0.01:
                     stagnation += 1
-                stagnation = stagnation + 1 if improvement < 0.01 else 0
+                else:
+                    stagnation = 0
 
                 # Milestone C: propose new scenarios every gen, prune stale ones.
                 if proposer is not None and harness.mode == "foundry" and time.monotonic() < deadline - 30:
