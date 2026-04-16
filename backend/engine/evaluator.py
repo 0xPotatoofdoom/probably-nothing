@@ -148,9 +148,13 @@ class HookEvaluator:
                         {"id": "persona-runner", "label": "Persona Runner"},
                         scenarios=active_scenarios,
                     )
-                    coverage = self._build_coverage_matrix(
-                        result["metrics"].get("per_scenario", {}), pool
-                    )
+                    raw_per = result["metrics"].get("per_scenario", {})
+                    yield {"type": "status",
+                           "message": f"Forge returned {len(raw_per)} test results, {result['metrics'].get('tests_passed',0)} passed, {result['metrics'].get('tests_failed',0)} failed"}
+                    if result.get("findings"):
+                        for f in result["findings"][:3]:
+                            yield {"type": "status", "message": f"  harness: {f}"}
+                    coverage = self._build_coverage_matrix(raw_per, pool)
                     # Surface findings from coverage failures
                     for pid, data in coverage.items():
                         for failure in data["failures"]:
@@ -290,8 +294,10 @@ class HookEvaluator:
             for p in PERSONAS
         }
         for key, rec in per_scenario.items():
-            # key looks like "test/scenarios/Scenario_Foo.t.sol::test_Bar"
-            contract = key.split("::")[0].rsplit("/", 1)[-1].replace(".t.sol", "")
+            # key looks like "test/scenarios/Scenario_Foo.t.sol:Scenario_Foo::test_Bar"
+            # .split(".t.sol")[0] gives "Scenario_Foo" regardless of whether forge
+            # appends ":ContractName" after the filename.
+            contract = key.split("::")[0].rsplit("/", 1)[-1].split(".t.sol")[0]
             scenario = pool.get_by_contract_name(contract)
             if scenario is None:
                 continue
