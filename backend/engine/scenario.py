@@ -574,7 +574,34 @@ class ScenarioProposer:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, self._compile_gate_sync, name, source)
 
+    @staticmethod
+    def _preprocess_source(source: str) -> str:
+        """Auto-fix common missing imports before compilation.
+
+        If the source uses a type that requires an import but doesn't have it,
+        inject the import. This avoids burning a full LLM fix pass on trivially
+        fixable issues.
+        """
+        # Map of type name → import line
+        _AUTO_IMPORTS = {
+            "BalanceDelta": 'import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";',
+            "Hooks": 'import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";',
+        }
+        for type_name, import_line in _AUTO_IMPORTS.items():
+            # Check if the type is used but not yet imported
+            if type_name in source and import_line not in source:
+                # Check it's actually used as a type (not just in a comment or string)
+                if re.search(r'\b' + type_name + r'\b', source):
+                    # Insert after the last existing import line
+                    import_re = re.compile(r'^import\s+.*$', re.MULTILINE)
+                    matches = list(import_re.finditer(source))
+                    if matches:
+                        last_import_end = matches[-1].end()
+                        source = source[:last_import_end] + '\n' + import_line + source[last_import_end:]
+        return source
+
     def _compile_gate_sync(self, name: str, source: str) -> tuple[bool, str]:
+        source = self._preprocess_source(source)
         path = self.pool.scenarios_dir / f"{name}.t.sol"
         path.write_text(source)
         try:
