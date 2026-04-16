@@ -135,6 +135,10 @@ V4_PRIMER_RULES = """\
      Only call `hook.method()` for functions you can see in the hook source
      shown below. When uncertain, skip hook-specific calls — a working indirect
      test beats a broken direct one.
+ 12. Do NOT use Solidity reserved words as variable names: `after`, `before`,
+     `var`, `let`, `match`, `in`, `of`, `null`, `switch`, `case`, `default`,
+     `static`, `typeof`. Use descriptive names like `amountOut`, `delta`,
+     `tokenId`, `gasUsed` instead.
 
 ═══ WORKING EXAMPLE ═══
 
