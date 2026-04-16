@@ -871,6 +871,33 @@ class ScenarioProposer:
         #     Strip the entire statement (the call result is discarded anyway).
         source = re.sub(r'\(\s*,[\s,]*\)\s*=\s*[^;]+;', '/* all-blank tuple removed */', source)
 
+        # 2s. Fix assert calls ending with comment+0 but missing close paren — Error 2314
+        #     Handles two variants after stripping:
+        #       assert(expr + /* comment */ 0;  → no comma before comment → add ", 0)"
+        #       assert(expr, /* comment */ 0;   → has comma before comment → add ")"
+        def _fix_assert_stripped_arg(m: re.Match) -> str:
+            content = m.group(1)  # everything inside assert( ... 0
+            comment_start = content.rfind('/*')
+            before_comment = content[:comment_start] if comment_start != -1 else content
+            if ',' in before_comment:
+                return content + ');'
+            return content + ', 0);'
+        source = re.sub(
+            r'(assert(?:Gt|Lt|Ge|Le|Eq|Ne)\s*\([^;]+?/\*[^*]*\*/\s*0)\s*;',
+            _fix_assert_stripped_arg,
+            source,
+        )
+
+        # 2t. Strip LiquidityAmounts.getLiquidityForAmounts / Constants.SQRT_PRICE — not in scope
+        #     These V4 test utilities don't exist in the foundry workspace.
+        #     LLMs should use doAddLiquidity() instead of computing liquidity manually.
+        source = re.sub(
+            r'\bLiquidityAmounts\.\w+\s*\([^)]*\)',
+            '/* LiquidityAmounts N/A — use doAddLiquidity */ 1 ether',
+            source,
+        )
+        source = re.sub(r'\bConstants\.SQRT_PRICE_\w+\b', '79228162514264337593543950336', source)
+
         # 3. Auto-inject / normalise known imports.
         #    Problem: LLMs often import from wrong paths (e.g. "lib/uniswap-hooks/..." or relative
         #    paths) causing Error 2904 "Declaration not found". Solution: for each known type,
@@ -1084,6 +1111,8 @@ class ScenarioProposer:
             f"  ✗ poolManager.getPool(...)   — method does not exist (9582)\n"
             f"  ✗ poolManager.getSlot0(...).sqrtPrice  — wrong return type (9582)\n"
             f"  ✗ positionManager.positions(...)  — method does not exist (9582)\n"
+            f"  ✗ LiquidityAmounts.getLiquidityForAmounts(...)  — not in scope, use doAddLiquidity\n"
+            f"  ✗ Constants.SQRT_PRICE_1_1  — not in scope, use numeric literal\n"
             f"  ✗ hook.fn{{value: X}}(...)  — non-payable (7006)\n"
             f"  ✗ DepegSeverity.X, Hook.FEE_X  — not in scope (7576)\n"
             f"  ✗ hook.poolManager() returns IPoolManager NOT address (9322/9574)\n"
@@ -1165,6 +1194,8 @@ class ScenarioProposer:
             f"  ✗ poolManager.getPool(...)   — method does not exist (9582)\n"
             f"  ✗ poolManager.getSlot0(...).sqrtPrice  — wrong return type (9582)\n"
             f"  ✗ positionManager.positions(...)  — method does not exist (9582)\n"
+            f"  ✗ LiquidityAmounts.getLiquidityForAmounts(...)  — not in scope, use doAddLiquidity\n"
+            f"  ✗ Constants.SQRT_PRICE_1_1  — not in scope, use numeric literal\n"
             f"  ✗ hook.fn{{value: X}}(...)  — non-payable (7006)\n"
             f"  ✗ DepegSeverity.X, Hook.FEE_X  — not in scope (7576)\n"
             f"  ✗ hook.poolManager() returns IPoolManager NOT address (9322/9574)\n"
