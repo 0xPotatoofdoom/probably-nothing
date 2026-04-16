@@ -654,6 +654,9 @@ class ScenarioProposer:
                   .replace('\u2032', "'").replace('\u2033', '"')   # ′ ″ prime/double-prime
                   .replace('\u2014', '--').replace('\u2013', '-')  # — – em/en dash
                   .replace('\u2192', '->').replace('\u2190', '<-') # → ← arrows
+                  .replace('\u2264', '<=').replace('\u2265', '>=') # ≤ ≥ comparison operators
+                  .replace('\u2260', '!=')                         # ≠ not-equal
+                  .replace('\u00d7', '*').replace('\u00f7', '/')   # × ÷ multiply/divide
                   .replace('\u2026', '...')                        # … ellipsis
                   )
 
@@ -681,6 +684,17 @@ class ScenarioProposer:
         source = re.sub(r'address\(hook\.poolManager\(\)\)', 'hook.poolManager()', source)
         source = re.sub(r'\bhook\.poolManager\(\)', 'address(hook.poolManager())', source)
 
+        # 2e. Fix broken "NOT CALLABLE" stubs without placeholder value (Error 6933)
+        #     The fast fix-LLM sometimes writes /* NOT CALLABLE ... */; without the 0.
+        #     That leaves bare assignments like `x = /* ... */;` → "Expected primary expression".
+        #     Insert 0 before the ; so the expression is valid.
+        source = re.sub(r'(NOT CALLABLE[^*]*\*+/)\s*;', r'\1 0;', source)
+
+        # 2f. Auto-fix int128 var = doSwap(...) → BalanceDelta var = doSwap(...) (Error 9574)
+        #     Rule 16 says doSwap() returns BalanceDelta, but LLMs still write int128 assignments.
+        #     Changing int128 → BalanceDelta makes the var usable via .amount0()/.amount1().
+        source = re.sub(r'\bint128(\s+\w+\s*=\s*doSwap\s*\()', r'BalanceDelta\1', source)
+
         # 2b. Replace hook.fn(non-empty-args) with a comment + 0 placeholder.
         #     All multi-arg hook calls are NOT CALLABLE; replacing them avoids 9553/7576
         #     while keeping zero-arg calls like hook.owner() or hook.totalProtectedVolume().
@@ -704,6 +718,8 @@ class ScenarioProposer:
             "BalanceDelta": 'import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";',
             "Hooks": 'import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";',
             "IHooks": 'import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";',
+            "TickMath": 'import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";',
+            "Constants": 'import {Constants} from "@uniswap/v4-core/test/utils/Constants.sol";',
         }
         for type_name, import_line in _AUTO_IMPORTS.items():
             if type_name in source and import_line not in source:
@@ -894,10 +910,14 @@ class ScenarioProposer:
             f"  ✗ positionManager.positions(...)  — method does not exist (9582)\n"
             f"  ✗ hook.fn{{value: X}}(...)  — non-payable (7006)\n"
             f"  ✗ DepegSeverity.X, Hook.FEE_X  — not in scope (7576)\n"
-            f"  ✗ hook.poolManager() returns IPoolManager NOT address — WRONG: assertEq(hook.poolManager(), address(poolManager)) (9322)\n"
-            f"  ✓ assertEq(address(hook.poolManager()), address(poolManager))  — CORRECT\n"
-            f"  ✗ i.toString(), x.toString()  — Solidity has NO .toString() method (9582)\n"
-            f"  ✗ \"text\" + expr + \"text\"  — Solidity has NO + string concat (2271); use string.concat() or drop the message\n"
+            f"  ✗ hook.poolManager() returns IPoolManager NOT address (9322/9574)\n"
+            f"  ✓ address(hook.poolManager())  — CORRECT to compare to address\n"
+            f"  ✗ i.toString(), x.toString()  — Solidity has NO .toString() (9582)\n"
+            f"  ✗ \"text\" + expr  — Solidity has NO + string concat (2271)\n"
+            f"  ✗ int128 x = doSwap(...)  — WRONG, doSwap returns BalanceDelta (9574)\n"
+            f"  ✓ BalanceDelta d = doSwap(-1 ether, true);  then d.amount1()  — CORRECT\n"
+            f"  ✗ IPoolManager.SwapParams, poolManager.swap(...)  — NOT in scope, NOT callable (7576/9582)\n"
+            f"  ✗ PNBase.getAmountsForLiquidity(...)  — does NOT exist (7576)\n"
             f"  ✓ doSwap(-1 ether, true).amount1()  — CORRECT\n"
             f"  ✓ hook.owner()  — zero-arg getter, CORRECT\n\n"
             f"═══ YOUR TASK ═══\n\n"
@@ -961,10 +981,14 @@ class ScenarioProposer:
             f"  ✗ positionManager.positions(...)  — method does not exist (9582)\n"
             f"  ✗ hook.fn{{value: X}}(...)  — non-payable (7006)\n"
             f"  ✗ DepegSeverity.X, Hook.FEE_X  — not in scope (7576)\n"
-            f"  ✗ hook.poolManager() returns IPoolManager NOT address — WRONG: assertEq(hook.poolManager(), address(poolManager)) (9322)\n"
-            f"  ✓ assertEq(address(hook.poolManager()), address(poolManager))  — CORRECT\n"
-            f"  ✗ i.toString(), x.toString()  — Solidity has NO .toString() method (9582)\n"
-            f"  ✗ \"text\" + expr + \"text\"  — Solidity has NO + string concat (2271); use string.concat() or drop the message\n"
+            f"  ✗ hook.poolManager() returns IPoolManager NOT address (9322/9574)\n"
+            f"  ✓ address(hook.poolManager())  — CORRECT to compare to address\n"
+            f"  ✗ i.toString(), x.toString()  — Solidity has NO .toString() (9582)\n"
+            f"  ✗ \"text\" + expr  — Solidity has NO + string concat (2271)\n"
+            f"  ✗ int128 x = doSwap(...)  — WRONG, doSwap returns BalanceDelta (9574)\n"
+            f"  ✓ BalanceDelta d = doSwap(-1 ether, true);  then d.amount1()  — CORRECT\n"
+            f"  ✗ IPoolManager.SwapParams, poolManager.swap(...)  — NOT in scope, NOT callable (7576/9582)\n"
+            f"  ✗ PNBase.getAmountsForLiquidity(...)  — does NOT exist (7576)\n"
             f"  ✓ doSwap(-1 ether, true).amount1()  — CORRECT\n"
             f"  ✓ hook.owner()  — zero-arg getter, CORRECT\n\n"
             f"═══ YOUR TASK ═══\n\n"
