@@ -149,16 +149,19 @@ PERSONAS: List[PersonaDef] = [
         description=(
             "a front-end team or DEX listing service (Uniswap Labs interface, DeFiLlama, GeckoTerminal) "
             "deciding whether to surface this pool. "
-            "You care about: whether the pool returns valid metadata, correct fee display, "
-            "whether the hook breaks standard pool queries, and eligibility for routing inclusion."
+            "You care about: whether the pool's hook interface is valid, whether basic swaps succeed, "
+            "and whether hook zero-arg getters return sensible values for display. "
+            "Use ONLY PNBase helpers (doSwap, doAddLiquidity, doRemoveLiquidity, hook zero-arg getters). "
+            "Do NOT check poolKey.hooks (it is IHooks not address), do NOT use poolManager.getSlot0, "
+            "do NOT expect events — just verify hook behavior via getters and swap outcomes."
         ),
         scenario_angles=[
-            "Query pool fee — does the hook return a valid, displayable fee?",
-            "Query pool tick spacing and verify it matches the hook's expectations",
-            "Verify the pool initializes with a valid sqrtPriceX96 (not zero, not out of range)",
-            "Check that hook permissions flags match what the contract actually implements",
-            "Test that a small swap succeeds (pool is functional enough to list)",
-            "Verify the pool emits standard events that front-ends can index",
+            "Small swap succeeds: doSwap(-0.01 ether, true) should return non-zero BalanceDelta",
+            "Hook owner is set: hook.owner() should return non-zero address",
+            "Pool accepts liquidity: doAddLiquidity(-60, 60, 1 ether) returns valid tokenId (>0)",
+            "Hook zero-arg getters return without revert: call each getter and assert non-revert",
+            "Round-trip: doAddLiquidity then doRemoveLiquidity — no permanent state corruption",
+            "Symmetric swaps: doSwap(-1 ether, true) and doSwap(-1 ether, false) both return non-zero",
         ],
     ),
     PersonaDef(
