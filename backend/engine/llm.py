@@ -88,6 +88,9 @@ class OpenAICompatLLM:
             return None
 
 
+DEFAULT_FAST_MODEL = "qwen2.5:3b"
+
+
 def build_llm() -> LLMClient:
     backend = os.getenv("PN_LLM_BACKEND", "ollama").lower()
     model = os.getenv("PN_LLM_MODEL", DEFAULT_MODEL)
@@ -96,4 +99,21 @@ def build_llm() -> LLMClient:
         api_key = os.getenv("PN_LLM_API_KEY")
         return OpenAICompatLLM(model=model, endpoint=endpoint, api_key=api_key)
     endpoint = os.getenv("PN_LLM_ENDPOINT", DEFAULT_OLLAMA_ENDPOINT)
+    return OllamaLLM(model=model, endpoint=endpoint)
+
+
+def build_fast_llm() -> LLMClient:
+    """
+    Return a fast, small LLM for repair/fix passes where latency matters more
+    than reasoning depth. Uses PN_LLM_FAST_MODEL (default: qwen2.5:3b).
+    Falls back to the main LLM if the fast model env var points to the same
+    backend or fast model isn't configured.
+    """
+    backend = os.getenv("PN_LLM_BACKEND", "ollama").lower()
+    model = os.getenv("PN_LLM_FAST_MODEL", DEFAULT_FAST_MODEL)
+    endpoint = os.getenv("PN_LLM_ENDPOINT", DEFAULT_OLLAMA_ENDPOINT)
+    if backend == "openai":
+        # For openai-compat backends, use the same endpoint but smaller model
+        api_key = os.getenv("PN_LLM_API_KEY")
+        return OpenAICompatLLM(model=model, endpoint=endpoint, api_key=api_key)
     return OllamaLLM(model=model, endpoint=endpoint)

@@ -71,6 +71,10 @@ class HookFetcher:
                 new_dir=Path("src"),
             )
 
+        # Rewrite any lib/<nested>/lib/<known-lib>/ style imports to direct lib/ paths.
+        # e.g. "lib/uniswap-hooks/lib/v4-periphery/BaseHook.sol" → "lib/v4-periphery/src/BaseHook.sol"
+        renamed_source = _normalize_lib_imports(renamed_source, ws)
+
         (ws / "src" / "Hook.sol").write_text(renamed_source)
         self.last_workspace = ws
         return renamed_source
@@ -233,19 +237,87 @@ _IMPORT_PATH_RE = re.compile(r'import\s+[^"\']*["\']([^"\']+)["\']')
 _IMPORT_REWRITE_RE = re.compile(r'(import\s+[^"\']*["\'])([^"\']+)(["\'])')
 
 
+# Libs that are safe to unify across the workspace dep tree.
+# V4 libs included so hooks that import via lib/uniswap-hooks/lib/v4-core/... get redirected.
+_STANDARD_LIBS = {
+    "openzeppelin-contracts", "solmate", "forge-std",
+    "v4-core", "v4-periphery", "v4-template",
+}
+
+# Maps a lib directory name to where its source lives in our workspace.
+# Used by _normalize_lib_imports to rewrite nested lib paths.
+_LIB_SRC_ROOTS: dict[str, str] = {
+    "v4-core":       "lib/v4-core/src/",
+    "v4-periphery":  "lib/v4-periphery/src/",
+    "forge-std":     "lib/forge-std/src/",
+    "openzeppelin-contracts": "lib/openzeppelin-contracts/",
+    "solmate":       "lib/solmate/src/",
+}
+
+# Regex to match one level of lib wrapping: lib/<wrapper>/lib/<known-lib>/
+# Captures group 1 = known lib name, so remainder = path[match.end():]
+_NESTED_LIB_RE = re.compile(
+    r"lib/[^/\"']+/lib/((?:" +
+    "|".join(re.escape(k) for k in _LIB_SRC_ROOTS) +
+    r"))/"
+)
+
+
+def _normalize_lib_imports(source: str, ws_dir: Path) -> str:
+    """
+    Rewrite nested lib/ import paths to direct workspace paths.
+
+    Hooks developed with git submodules often import from non-standard nested
+    paths like 'lib/uniswap-hooks/lib/v4-periphery/src/BaseHook.sol'. Our
+    workspace has these at the top level. Strip the nesting so forge can find
+    them via our remappings.
+
+    Falls back to a filename search in workspace lib/ for any import that still
+    doesn't resolve after the regex rewrite.
+    """
+    ws_lib = ws_dir / "lib"
+
+    def _rewrite(m: re.Match) -> str:
+        prefix, path, suffix = m.group(1), m.group(2), m.group(3)
+        if not path.startswith("lib/"):
+            return m.group(0)
+
+        # Step 1: strip nested lib/<wrapper>/lib/<known>/ to direct lib/<known>/
+        nested_m = _NESTED_LIB_RE.match(path)
+        if nested_m:
+            lib_name = nested_m.group(1)
+            remainder = path[nested_m.end():]   # everything after the lib name + /
+            canonical_root = _LIB_SRC_ROOTS.get(lib_name, f"lib/{lib_name}/")
+            # Only rewrite if the canonical path actually exists in the workspace.
+            candidate = ws_dir / canonical_root / remainder
+            if candidate.exists():
+                return prefix + canonical_root + remainder + suffix
+            # Try without /src/ infix (some repos omit it)
+            alt_root = f"lib/{lib_name}/"
+            candidate2 = ws_dir / alt_root / remainder
+            if candidate2.exists():
+                return prefix + alt_root + remainder + suffix
+
+        # Step 2: if path still doesn't exist, try to find the file by name in ws lib/
+        if not (ws_dir / path).exists() and ws_lib.exists():
+            filename = Path(path).name
+            hits = sorted(ws_lib.rglob(filename),
+                          key=lambda p: len(p.parts))  # prefer shallower (more canonical)
+            if hits:
+                rel = str(hits[0].relative_to(ws_dir))
+                return prefix + rel + suffix
+
+        return m.group(0)
+
+    return _IMPORT_REWRITE_RE.sub(_rewrite, source)
+
+
 def _redirect_nested_libs(user_lib: Path, ws_lib: Path) -> None:
     """
-    When the user supplies a NEWER version of a standard lib (openzeppelin-contracts,
-    solmate, forge-std), replace stale copies of that lib nested inside workspace libs
-    (e.g. lib/uniswap-hooks/lib/v4-core/lib/openzeppelin-contracts) with a relative
-    symlink to the user's copy.  This fixes version-conflict compile errors like
-    "Hashes.sol not found" when a repo needs OZ ≥ 5.1 but the workspace has 5.0.x.
-
-    Only redirects if the user's copy exists AND appears to contain more files than the
-    workspace's nested copy (a lightweight "newer" heuristic).
+    Replace stale nested copies of standard libs inside workspace libs with
+    symlinks to the top-level copy. This fixes version-conflict compile errors
+    (e.g. OZ 5.0 nested inside a lib that needs OZ 5.1).
     """
-    # Standard libs that can safely be unified across the dep tree.
-    _STANDARD_LIBS = {"openzeppelin-contracts", "solmate", "forge-std"}
 
     for lib_name in _STANDARD_LIBS:
         user_copy = user_lib / lib_name

@@ -25,7 +25,7 @@ from typing import Dict, List, Optional
 
 import httpx
 
-from .llm import LLMClient
+from .llm import LLMClient, build_fast_llm
 from .persona import PersonaDef
 
 
@@ -125,6 +125,13 @@ V4_PRIMER_RULES = """\
   8. doSwap amount is always treated as exact-input uint128 — do not pass 0.
   9. Do NOT call poolManager, positionManager, or swapRouter directly — use
      the helper functions defined in PNBase.
+ 10. The hook is deployed as `Hook` (renamed). To call hook-specific public
+     functions: `hook.method()` — no import needed. Do NOT import the original
+     contract name (SentinelPegHook, ClankerHook, etc.) — it is NOT on disk.
+ 11. PREFER testing behavior indirectly via doSwap/doAddLiquidity/sandwich.
+     Only call `hook.method()` for functions you can see in the hook source
+     below. If uncertain, skip hook-specific calls — a working indirect test
+     beats a broken direct one.
 
 ═══ WORKING EXAMPLE ═══
 
@@ -308,6 +315,7 @@ class ScenarioProposer:
 
     def __init__(self, llm: LLMClient, workspace: Path, pool: ScenarioPool):
         self.llm = llm
+        self.fast_llm = build_fast_llm()  # small model for quick fix/repair passes
         self.workspace = Path(workspace)
         self.pool = pool
         self._security_context: Optional[str] = None
@@ -404,26 +412,40 @@ class ScenarioProposer:
     async def _fix_scenario(
         self, name: str, source: str, error: str, hook_source: str, timeout: float
     ) -> Optional[str]:
-        """Ask the LLM to fix a scenario that failed to compile."""
-        pnbase_block = (
-            f"═══ PNBASE CONTRACT (your base — read exact function signatures) ═══\n\n"
-            f"```solidity\n{self._pnbase_source}\n```\n\n"
-        ) if self._pnbase_source else ""
+        """Ask the fast LLM to fix a scenario that failed to compile.
+
+        Uses a small fast model (qwen2.5:3b, ~5s) instead of the main model
+        (~90s) because fix passes need low latency more than deep reasoning.
+        The prompt is intentionally minimal to stay within the 3B model's
+        context window.
+        """
+        # Extract only the relevant part of PNBase (function signatures, not full source)
+        pnbase_sig_block = ""
+        if self._pnbase_source:
+            # Pull out just function declarations (lines with "function" keyword)
+            sigs = [ln.strip() for ln in self._pnbase_source.splitlines()
+                    if "function " in ln and not ln.strip().startswith("//")]
+            pnbase_sig_block = "PNBase functions available:\n" + "\n".join(sigs[:30]) + "\n\n"
 
         prompt = (
-            f"{V4_PRIMER_HEADER}\n\n"
-            f"{pnbase_block}"
-            f"{V4_PRIMER_RULES}\n\n"
-            f"═══ HOOK UNDER TEST ═══\n\n```solidity\n{hook_source[:3000]}\n```\n\n"
-            f"═══ FIX THIS SCENARIO ═══\n\n"
-            f"The following scenario failed to compile:\n\n"
-            f"```solidity\n{source}\n```\n\n"
+            f"Fix this Solidity compiler error. Output ONLY the corrected ```solidity block.\n\n"
+            f"Contract name must remain: `{name}`\n"
+            f"RULES:\n"
+            f"  - APPROVED imports ONLY (remove any others):\n"
+            f'      import {{PNBase}} from "../base/PNBase.t.sol";\n'
+            f'      import {{BalanceDelta}} from "@uniswap/v4-core/src/types/BalanceDelta.sol";\n'
+            f'      import {{TickMath}} from "@uniswap/v4-core/src/libraries/TickMath.sol";\n'
+            f'      import {{Constants}} from "@uniswap/v4-core/test/utils/Constants.sol";\n'
+            f"  - Call hook methods via `hook.method()` — the contract is named `Hook`.\n"
+            f"    Remove any import of the original contract name (e.g. SentinelPegHook).\n"
+            f"  - Use PNBase helpers: doSwap, doAddLiquidity, doRemoveLiquidity, sandwich.\n"
+            f"    Never call poolManager/positionManager/swapRouter directly.\n\n"
+            f"{pnbase_sig_block}"
             f"Compiler error:\n```\n{error}\n```\n\n"
-            f"Fix the scenario so it compiles. Output ONLY the fixed ```solidity block. "
-            f"Keep the contract name `{name}` and the same test intent. "
-            f"Do NOT add any imports not in the APPROVED list."
+            f"Broken source:\n```solidity\n{source}\n```\n\n"
+            f"Fixed source:"
         )
-        raw = await self.llm.complete(prompt, timeout=timeout)
+        raw = await self.fast_llm.complete(prompt, timeout=min(timeout, 30.0))
         if not raw:
             return None
         parts = _split_scenarios(raw)
@@ -453,9 +475,16 @@ class ScenarioProposer:
                 return True, ""
             # Clean up the rejected file so it doesn't poison subsequent builds.
             path.unlink(missing_ok=True)
-            err = (r.stderr or r.stdout).splitlines()
-            first = next((ln for ln in err if "Error" in ln or "error:" in ln), err[0] if err else "compile failed")
-            return False, first.strip()[:200]
+            err_text = r.stderr or r.stdout or ""
+            err_lines = err_text.splitlines()
+            # Collect all meaningful error lines (skip bare "Compiler run failed:" header)
+            detail_lines = [
+                ln.strip() for ln in err_lines
+                if ("Error" in ln or "error:" in ln or "Warning" in ln or "-->" in ln)
+                and "Compiler run failed" not in ln
+            ]
+            summary = "; ".join(detail_lines[:4]) if detail_lines else (err_lines[0].strip() if err_lines else "compile failed")
+            return False, summary[:400]
         except Exception as e:
             path.unlink(missing_ok=True)
             return False, f"compile-gate exception: {e}"
