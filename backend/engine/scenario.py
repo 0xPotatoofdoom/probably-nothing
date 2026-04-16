@@ -63,13 +63,42 @@ async def _load_uniswap_ai_context() -> str:
 WORKSPACE_IMAGE = os.getenv("PN_FOUNDRY_IMAGE", "probably-nothing-foundry")
 COMPILE_TIMEOUT = int(os.getenv("PN_COMPILE_TIMEOUT", "60"))
 
-V4_PRIMER = """\
+V4_PRIMER_HEADER = """\
 # V4 scenario-author primer
 
 You are authoring a Foundry test contract that probes a Uniswap V4 hook.
-Study the WORKING EXAMPLE below and follow its structure exactly.
+The base contract your scenario MUST inherit is shown below — read it carefully.
 
-═══ WORKING EXAMPLE (copy this structure) ═══
+═══ APPROVED IMPORTS (use ONLY these — no others ever) ═══
+
+```
+import {PNBase} from "../base/PNBase.t.sol";
+import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
+import {Constants} from "@uniswap/v4-core/test/utils/Constants.sol";
+```
+
+Do NOT import anything else — not IPoolManager, not PoolKey, not IHooks, nothing.
+Everything you need is already inherited from PNBase.
+"""
+
+V4_PRIMER_RULES = """\
+═══ HARD RULES (violation = compile failure) ═══
+
+  1. Exactly ONE ```solidity fenced block per scenario. No prose between blocks.
+  2. Contract name MUST start with `Scenario_` (e.g. `Scenario_JIT_LP`).
+  3. Contract MUST inherit `PNBase`. Do NOT override `setUp()`.
+  4. Every test function MUST start with `test_`.
+  5. Do NOT redeclare hook, poolKey, currency0, currency1, poolId, poolManager,
+     positionManager, swapRouter, FEE, TICK_SPACING, tickLower, tickUpper,
+     seedTokenId — these are already in PNBase.
+  6. ONLY use imports from the APPROVED list above. No other imports.
+  7. Tick arguments to doAddLiquidity MUST be multiples of 60.
+  8. doSwap amount is always treated as exact-input uint128 — do not pass 0.
+  9. Do NOT call poolManager, positionManager, or swapRouter directly — use
+     the helper functions defined in PNBase.
+
+═══ WORKING EXAMPLE ═══
 
 ```solidity
 // SPDX-License-Identifier: MIT
@@ -79,93 +108,53 @@ import {PNBase} from "../base/PNBase.t.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 
 contract Scenario_WorkingExample is PNBase {
-    // test a swap and assert direction is correct
     function test_ExactInput_0For1_outputPositive() public {
         BalanceDelta delta = doSwap(-1 ether, true);
         assertLt(int256(delta.amount0()), 0, "spent token0");
         assertGt(int256(delta.amount1()), 0, "received token1");
     }
 
-    // test liquidity round-trip produces no net loss
     function test_AddRemove_NoNetLoss() public {
         uint256 tokenId = doAddLiquidity(-60, 60, 1 ether);
         doRemoveLiquidity(tokenId, 1 ether);
     }
 
-    // test hook survives a basic sandwich
     function test_Sandwich_Survives() public {
         sandwich(-0.5 ether, true, -0.1 ether);
     }
 
-    // test near-zero swap does not revert
-    function test_TinySwap_NoRevert() public {
+    function test_GasRegression_SmallSwap() public {
+        uint256 g = gasleft();
         doSwap(-1000, true);
+        assertLt(g - gasleft(), 500_000, "gas too high");
     }
 }
 ```
 
-═══ APPROVED IMPORTS (use ONLY these — no others) ═══
-
-```
-import {PNBase} from "../base/PNBase.t.sol";
-import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
-import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
-import {Constants} from "@uniswap/v4-core/test/utils/Constants.sol";
-```
-
-Do NOT import anything else. PNBase already re-exports: hook, poolKey, currency0,
-currency1, poolManager, positionManager, swapRouter, TICK_SPACING, FEE.
-
-═══ AVAILABLE HELPERS (from PNBase) ═══
-
-  doSwap(int256 amount, bool zeroForOne) returns (BalanceDelta)
-    — negative amount = exact-input, positive = exact-output
-    — zeroForOne=true means selling token0 to buy token1
-
-  doSwapWithHookData(int256 amount, bool zeroForOne, bytes memory hookData) returns (BalanceDelta)
-
-  doAddLiquidity(int24 lower, int24 upper, uint128 liquidity) returns (uint256 tokenId)
-    — tick values must be multiples of TICK_SPACING (60)
-    — e.g. lower=-120, upper=120  or  lower=-600, upper=600
-
-  doRemoveLiquidity(uint256 tokenId, uint128 liquidity)
-
-  sandwich(int256 victimAmount, bool zeroForOne, int256 attackerAmount)
-    — runs: front-run, victim swap, back-run in one call
-
-═══ HARD RULES ═══
-
-  1. Exactly ONE ```solidity fenced block per scenario. No prose between blocks.
-  2. Contract name MUST start with `Scenario_` (e.g. `Scenario_JIT_LP`).
-  3. Contract MUST inherit `PNBase`. Do NOT override `setUp()`.
-  4. Every test function MUST start with `test_`.
-  5. Do NOT redeclare hook, poolKey, currency0, currency1, or any PNBase variable.
-  6. ONLY use imports from the APPROVED list above.
-  7. Tick arguments to doAddLiquidity must be multiples of 60.
-
 ═══ SCENARIO IDEAS (pick angles the working example does NOT cover) ═══
 
   Routing edge cases:
-  - Swap that would move price across a tick boundary (large amount, e.g. 50 ether)
-  - Exact-output swap (positive amountSpecified, e.g. doSwap(1 ether, true))
-  - Sequential swaps in opposite directions checking price impact symmetry
+  - Large swap through tick boundary: doSwap(-50 ether, true)
+  - Sequential swaps in both directions checking symmetry
+  - doSwap(-1, true) — minimum viable swap
 
   LP stress:
-  - Narrow range: doAddLiquidity(-60, 60, 10 ether) then swap through it
+  - Narrow range: doAddLiquidity(-60, 60, 10 ether) then doSwap(-5 ether, true)
   - Wide range: doAddLiquidity(-6000, 6000, 1 ether)
-  - JIT: add liquidity, swap, remove liquidity in one test — measure fee capture
+  - JIT: doAddLiquidity → doSwap → doRemoveLiquidity in one test
 
   MEV / ordering:
-  - Multi-swap sandwich with larger front-run
-  - Repeated sandwiches checking hook state monotonicity
+  - sandwich(-1 ether, true, -5 ether) — aggressive front-run
+  - Repeated sandwiches: run sandwich twice and assert state doesn't drift
 
-  Hook behaviour:
-  - doSwapWithHookData passing abi.encode(uint256(0)) or abi.encode(address(this))
-  - vm.expectRevert() if the hook is known to gate certain inputs
+  Hook data probing:
+  - doSwapWithHookData(-1 ether, true, abi.encode(uint256(0)))
+  - doSwapWithHookData(-1 ether, true, abi.encode(address(this)))
+  - doSwapWithHookData(-1 ether, true, hex"") — empty hookData
 
-  Gas regression:
-  - Large swap vs small swap — assert gas < some reasonable threshold
-    (use gasleft() before/after: uint256 g = gasleft(); doSwap(...); assertLt(g - gasleft(), 300_000))
+  Security probes (from V4 vulnerability catalog):
+  - Delta accounting: add liquidity, swap, remove — assert net token balance unchanged
+  - Reentrancy surface: rapid sequential swaps checking no state corruption
 """
 
 
@@ -276,6 +265,9 @@ class ScenarioPool:
         return [s.scenario_id for s in drop]
 
 
+_PNBASE_TEMPLATE = Path(__file__).parent.parent / "foundry_workspace" / "test" / "base" / "PNBase.t.sol"
+
+
 class ScenarioProposer:
     """LLM-backed scenario author."""
 
@@ -284,6 +276,14 @@ class ScenarioProposer:
         self.workspace = Path(workspace)
         self.pool = pool
         self._security_context: Optional[str] = None
+        # Load PNBase source so the model sees the exact API, not a summary.
+        ws_pnbase = self.workspace / "test" / "base" / "PNBase.t.sol"
+        if ws_pnbase.exists():
+            self._pnbase_source = ws_pnbase.read_text()
+        elif _PNBASE_TEMPLATE.exists():
+            self._pnbase_source = _PNBASE_TEMPLATE.read_text()
+        else:
+            self._pnbase_source = None
 
     async def _ensure_security_context(self) -> None:
         if self._security_context is None:
@@ -298,18 +298,23 @@ class ScenarioProposer:
         skill_md: Optional[str] = None,
         timeout: float = 120.0,
     ) -> tuple[List[Scenario], List[str]]:
-        """Propose up to `count` new scenarios. Compile-gated.
+        """Propose up to `count` new scenarios. Compile-gated with fix-and-retry.
 
         Returns (accepted, rejection_reasons) so callers can surface failures.
         """
         await self._ensure_security_context()
         accepted: List[Scenario] = []
         rejections: List[str] = []
-        # Single LLM call is cheapest; we ask for `count` scenarios at once and split them.
-        prompt = self._build_prompt(hook_source, count, recent_findings, skill_md)
-        raw = await self.llm.complete(prompt, timeout=timeout)
+        failed_examples: List[tuple[str, str]] = []  # (source_snippet, error)
+
+        time_start = asyncio.get_event_loop().time()
+        time_limit = timeout * 0.7  # reserve 30% for fix attempts
+
+        prompt = self._build_prompt(hook_source, count, recent_findings, skill_md, failed_examples)
+        raw = await self.llm.complete(prompt, timeout=time_limit)
         if not raw:
             return [], []
+
         for source in _split_scenarios(raw):
             name = _extract_contract_name(source)
             if not name:
@@ -320,8 +325,22 @@ class ScenarioProposer:
                 continue
             ok, reason = await self._compile_gate(name, source)
             if not ok:
-                rejections.append(f"{name}: {reason}")
-                continue
+                # Attempt one fix pass with the compiler error as feedback
+                elapsed = asyncio.get_event_loop().time() - time_start
+                fix_budget = timeout - elapsed - 5.0
+                if fix_budget > 15.0:
+                    fixed = await self._fix_scenario(name, source, reason, hook_source, fix_budget)
+                    if fixed:
+                        ok2, reason2 = await self._compile_gate(name, fixed)
+                        if ok2:
+                            source = fixed
+                            ok = True
+                        else:
+                            reason = reason2
+                if not ok:
+                    failed_examples.append((source[:400], reason))
+                    rejections.append(f"{name}: {reason}")
+                    continue
             scenario = Scenario(
                 scenario_id=f"llm::{name}",
                 contract_name=name,
@@ -333,6 +352,34 @@ class ScenarioProposer:
             self.pool.add(scenario)
             accepted.append(scenario)
         return accepted, rejections
+
+    async def _fix_scenario(
+        self, name: str, source: str, error: str, hook_source: str, timeout: float
+    ) -> Optional[str]:
+        """Ask the LLM to fix a scenario that failed to compile."""
+        pnbase_block = (
+            f"═══ PNBASE CONTRACT (your base — read exact function signatures) ═══\n\n"
+            f"```solidity\n{self._pnbase_source}\n```\n\n"
+        ) if self._pnbase_source else ""
+
+        prompt = (
+            f"{V4_PRIMER_HEADER}\n\n"
+            f"{pnbase_block}"
+            f"{V4_PRIMER_RULES}\n\n"
+            f"═══ HOOK UNDER TEST ═══\n\n```solidity\n{hook_source[:3000]}\n```\n\n"
+            f"═══ FIX THIS SCENARIO ═══\n\n"
+            f"The following scenario failed to compile:\n\n"
+            f"```solidity\n{source}\n```\n\n"
+            f"Compiler error:\n```\n{error}\n```\n\n"
+            f"Fix the scenario so it compiles. Output ONLY the fixed ```solidity block. "
+            f"Keep the contract name `{name}` and the same test intent. "
+            f"Do NOT add any imports not in the APPROVED list."
+        )
+        raw = await self.llm.complete(prompt, timeout=timeout)
+        if not raw:
+            return None
+        parts = _split_scenarios(raw)
+        return parts[0] if parts else None
 
     async def _compile_gate(self, name: str, source: str) -> tuple[bool, str]:
         """Write the scenario, run `forge build --match-path` against it, roll back on failure."""
@@ -371,6 +418,7 @@ class ScenarioProposer:
         count: int,
         recent_findings: List[str],
         skill_md: Optional[str],
+        failed_examples: Optional[List[tuple]] = None,
     ) -> str:
         existing = sorted({s.contract_name for s in self.pool.all()})
         existing_block = ("Do NOT duplicate these existing scenario contracts:\n  - "
@@ -381,23 +429,36 @@ class ScenarioProposer:
             f"═══ V4 SECURITY REFERENCE (from Uniswap official docs) ═══\n\n"
             f"{self._security_context}\n\n"
         ) if self._security_context else ""
+        pnbase_block = (
+            f"═══ PNBASE CONTRACT (your base — read exact function signatures) ═══\n\n"
+            f"```solidity\n{self._pnbase_source}\n```\n\n"
+        ) if self._pnbase_source else ""
+        failed_block = ""
+        if failed_examples:
+            lines = ["═══ PREVIOUSLY FAILED PROPOSALS — DO NOT REPEAT THESE PATTERNS ═══\n"]
+            for snippet, error in failed_examples[-4:]:
+                lines.append(f"Failed source (truncated):\n```solidity\n{snippet}\n```\nError: {error}\n")
+            failed_block = "\n".join(lines) + "\n"
 
         return (
-            f"{V4_PRIMER}\n\n"
+            f"{V4_PRIMER_HEADER}\n\n"
+            f"{pnbase_block}"
+            f"{V4_PRIMER_RULES}\n\n"
             f"{security_block}"
             f"{skill_block}"
             f"═══ HOOK UNDER TEST (src/Hook.sol) ═══\n\n"
             f"```solidity\n{hook_source}\n```\n\n"
             f"═══ RECENT FINDINGS ═══\n{findings_block}\n\n"
+            f"{failed_block}"
             f"{existing_block}\n\n"
             f"═══ YOUR TASK ═══\n\n"
-            f"Propose {count} NEW test scenarios. Requirements:\n"
-            f"  - Each is a COMPLETE Solidity contract in its own ```solidity fenced block\n"
-            f"  - Contract name starts with `Scenario_` and is unique\n"
-            f"  - Inherits PNBase, uses only APPROVED imports, no setUp() override\n"
-            f"  - Tests probe the hook above from angles NOT already covered by existing scenarios\n"
-            f"  - Prioritise probing the known V4 vulnerability patterns from the security reference above\n"
-            f"  - NEVER import anything outside the approved list — it will fail to compile\n\n"
+            f"Propose {count} NEW test scenarios. Each must:\n"
+            f"  - Be a COMPLETE Solidity contract in its own ```solidity fenced block\n"
+            f"  - Start with `Scenario_` and be unique\n"
+            f"  - Inherit PNBase, use ONLY APPROVED imports, no setUp() override\n"
+            f"  - Call only functions defined in PNBase above — no direct pool/position/swap calls\n"
+            f"  - Probe vulnerability patterns from the V4 security reference\n"
+            f"  - NEVER import anything outside the approved list\n\n"
             f"Output {count} ```solidity blocks, nothing else."
         )
 
