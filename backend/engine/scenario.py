@@ -150,7 +150,12 @@ V4_PRIMER_RULES = """\
      WRONG: assertEq(fee, Hook.FEE_SEVERE);   ← Hook is not a type you can access
      RIGHT: use numeric values or ignore the constant entirely.
 
- 15. doSwap() returns BalanceDelta — NOT int128, NOT uint256, NOT an int256.
+ 15. Do NOT use `{value: ...}` in any function call. Hook functions are not
+     payable. `hook.anything{value: 0}(...)` causes Error 7006 even with value: 0.
+     WRONG: hook.setDepegState{value: 0}(...)   ← Error 7006
+     RIGHT: never call hook functions with args at all (see Rule 11)
+
+ 16. doSwap() returns BalanceDelta — NOT int128, NOT uint256, NOT an int256.
      WRONG: int128 x = doSwap(-1 ether, true);        ← Error 9574, won't compile
      RIGHT: int128 x = doSwap(-1 ether, true).amount1();  ← inline .amount1()
      RIGHT: BalanceDelta d = doSwap(-1 ether, true);  ← named var (import required)
@@ -642,11 +647,15 @@ class ScenarioProposer:
         2. Auto-inject known missing imports (Error 7920 for BalanceDelta/Hooks).
         These avoid burning a full LLM fix pass on easily fixable issues.
         """
-        # 1. Replace curly/smart quotes that LLMs sometimes emit
+        # 1. Replace Unicode punctuation that LLMs emit but Solidity strings can't contain
         source = (source
-                  .replace('\u201c', '"').replace('\u201d', '"')   # " "
-                  .replace('\u2018', "'").replace('\u2019', "'")   # ' '
-                  .replace('\u2032', "'").replace('\u2033', '"'))  # ′ ″
+                  .replace('\u201c', '"').replace('\u201d', '"')   # " " curly double quotes
+                  .replace('\u2018', "'").replace('\u2019', "'")   # ' ' curly single quotes
+                  .replace('\u2032', "'").replace('\u2033', '"')   # ′ ″ prime/double-prime
+                  .replace('\u2014', '--').replace('\u2013', '-')  # — – em/en dash
+                  .replace('\u2192', '->').replace('\u2190', '<-') # → ← arrows
+                  .replace('\u2026', '...')                        # … ellipsis
+                  )
 
         # 2. Auto-inject missing imports
         _AUTO_IMPORTS = {
