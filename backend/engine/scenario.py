@@ -104,6 +104,7 @@ import {PNBase} from "../base/PNBase.t.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {Constants} from "@uniswap/v4-core/test/utils/Constants.sol";
+import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 ```
 
 Do NOT import anything else — not IPoolManager, not PoolKey, not IHooks, nothing.
@@ -216,22 +217,23 @@ contract Scenario_WorkingExample is PNBase {
 _HOOK_CALL_WARNING = """\
 ═══ HOOK CALL ANTI-PATTERNS (memorise — these cause EVERY run to fail) ═══
 
-The following patterns look reasonable but ALWAYS produce compile errors.
-Do NOT write them. No exceptions.
+  WRONG — do NOT call hook functions that are marked [HOOK INTERNAL] in the source:
+    hook.setDepegState(...);   ← marked [HOOK INTERNAL] → compile error
+    hook.registerPool(...);    ← marked [HOOK INTERNAL] → compile error
+    hook.getCurrentFee(...);   ← marked [HOOK INTERNAL] → compile error
 
   WRONG (Error 9553 — Currency ≠ address):
-    hook.registerPool(poolKey, currency0);     ← currency0 is Currency, not address
-    hook.setDepegState(currency0, 1, 100);     ← Currency ≠ address; 1 ≠ enum
-    address s = currency0;                     ← Currency is NOT implicitly address
+    address s = currency0;     ← Currency is NOT implicitly address
 
-  WRONG (Error 7920 — BalanceDelta not imported):
-    BalanceDelta delta = doSwap(-1 ether, true);  ← missing import → compile error
+  WRONG (Error 7920 — type not imported):
+    BalanceDelta delta = doSwap(-1 ether, true);  ← import BalanceDelta or use inline
 
   RIGHT — test behavior indirectly, no hook calls with args:
-    doSwap(-1 ether, true);                    ← tests the hook implicitly
-    int128 out = doSwap(-1 ether, true).amount1();  ← no BalanceDelta import needed
+    doSwap(-1 ether, true);                         ← tests the hook implicitly
+    int128 out = doSwap(-1 ether, true).amount1();  ← no import needed
     uint256 tokenId = doAddLiquidity(-60, 60, 1 ether);
     sandwich(-0.5 ether, true, -0.1 ether);
+    // Read public state: hook.totalProtectedVolume(), hook.stalenessThreshold()
 
 """
 
@@ -268,8 +270,10 @@ def _safe_hook_source(source: str) -> str:
             params = param_m.group(1).strip() if param_m else ''
 
             if params:
-                # Has parameters — replace with a stub and skip the body
-                out.append(f"{indent}// [NOT CALLABLE — arg types unknown] function {fn_name}(...)\n")
+                # Has parameters — replace with a nameless stub and skip the body.
+                # Intentionally omits the function name so the LLM cannot generate
+                # a call to it (seeing "registerPool" → generates "hook.registerPool(...)").
+                out.append(f"{indent}// [HOOK INTERNAL — not testable directly]\n")
                 i = j + 1  # skip to line after closing paren of params
                 # Start with brace depth from sig_lines (handles '{' on same line as signature)
                 brace_depth = sum(sl.count('{') - sl.count('}') for sl in sig_lines)
