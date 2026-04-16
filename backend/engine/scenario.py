@@ -23,7 +23,41 @@ from pathlib import Path
 from statistics import pvariance
 from typing import Dict, List, Optional
 
+import httpx
+
 from .llm import LLMClient
+
+
+# ─── uniswap-ai security context ───────────────────────────────────────────────
+
+_UNISWAP_AI_BASE = "https://raw.githubusercontent.com/Uniswap/uniswap-ai/main"
+_UNISWAP_AI_FILES = [
+    "packages/plugins/uniswap-hooks/skills/v4-security-foundations/references/vulnerabilities-catalog.md",
+    "packages/plugins/uniswap-hooks/skills/v4-security-foundations/references/audit-checklist.md",
+]
+_UNISWAP_AI_CAP_BYTES = 12 * 1024  # cap total injected context at 12 KB
+
+_uniswap_ai_context: Optional[str] = None
+
+
+async def _load_uniswap_ai_context() -> str:
+    """Fetch security reference docs from uniswap-ai. Cached after first call."""
+    global _uniswap_ai_context
+    if _uniswap_ai_context is not None:
+        return _uniswap_ai_context
+    parts: List[str] = []
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            for path in _UNISWAP_AI_FILES:
+                url = f"{_UNISWAP_AI_BASE}/{path}"
+                r = await client.get(url)
+                if r.status_code == 200:
+                    parts.append(r.text)
+    except Exception:
+        pass  # network unavailable — proceed without
+    combined = "\n\n".join(parts)[:_UNISWAP_AI_CAP_BYTES]
+    _uniswap_ai_context = combined
+    return combined
 
 
 WORKSPACE_IMAGE = os.getenv("PN_FOUNDRY_IMAGE", "probably-nothing-foundry")
@@ -249,6 +283,11 @@ class ScenarioProposer:
         self.llm = llm
         self.workspace = Path(workspace)
         self.pool = pool
+        self._security_context: Optional[str] = None
+
+    async def _ensure_security_context(self) -> None:
+        if self._security_context is None:
+            self._security_context = await _load_uniswap_ai_context()
 
     async def propose_batch(
         self,
@@ -263,6 +302,7 @@ class ScenarioProposer:
 
         Returns (accepted, rejection_reasons) so callers can surface failures.
         """
+        await self._ensure_security_context()
         accepted: List[Scenario] = []
         rejections: List[str] = []
         # Single LLM call is cheapest; we ask for `count` scenarios at once and split them.
@@ -337,9 +377,14 @@ class ScenarioProposer:
                           + "\n  - ".join(existing)) if existing else ""
         findings_block = "\n".join(f"- {f}" for f in recent_findings[-24:]) or "- (no findings yet)"
         skill_block = f"<skill>\n{skill_md.strip()}\n</skill>\n\n" if skill_md else ""
+        security_block = (
+            f"═══ V4 SECURITY REFERENCE (from Uniswap official docs) ═══\n\n"
+            f"{self._security_context}\n\n"
+        ) if self._security_context else ""
 
         return (
             f"{V4_PRIMER}\n\n"
+            f"{security_block}"
             f"{skill_block}"
             f"═══ HOOK UNDER TEST (src/Hook.sol) ═══\n\n"
             f"```solidity\n{hook_source}\n```\n\n"
@@ -351,6 +396,7 @@ class ScenarioProposer:
             f"  - Contract name starts with `Scenario_` and is unique\n"
             f"  - Inherits PNBase, uses only APPROVED imports, no setUp() override\n"
             f"  - Tests probe the hook above from angles NOT already covered by existing scenarios\n"
+            f"  - Prioritise probing the known V4 vulnerability patterns from the security reference above\n"
             f"  - NEVER import anything outside the approved list — it will fail to compile\n\n"
             f"Output {count} ```solidity blocks, nothing else."
         )

@@ -89,7 +89,11 @@ class HookEvaluator:
 
                 proposer = ScenarioProposer(self.llm, workspace, pool)
 
-                if harness.mode == "foundry" and self.llm.backend != "mock":
+                if harness.mode == "foundry":
+                    yield {"type": "status", "message": "Loading V4 security reference from uniswap-ai..."}
+                    await proposer._ensure_security_context()
+                    ctx_size = len(proposer._security_context or "")
+                    yield {"type": "status", "message": f"Security context: {ctx_size:,} chars loaded." if ctx_size else "Security context: unavailable (offline?), continuing without."}
                     yield {"type": "status", "message": f"Seeding scenario pool — proposing {SEED_SCENARIO_COUNT} scenarios..."}
                     seed, seed_rejects = await proposer.propose_batch(
                         hook_source, count=SEED_SCENARIO_COUNT, gen=0,
@@ -191,14 +195,14 @@ class HookEvaluator:
                     }
 
                     for finding in result.get("findings", []):
-                        prefix = "Re-checking: " if finding in seed_ring else ""
-                        text = f"{prefix}{finding}" + (" → confirmed" if prefix else "")
-                        record = {"agent_id": result["agent_id"], "text": text,
+                        if finding in seed_ring:
+                            continue  # already surfaced — suppress re-confirmation noise
+                        seed_ring.append(finding)
+                        record = {"agent_id": result["agent_id"], "text": finding,
                                   "score": score, "generation": generation}
                         all_findings.append(record)
-                        seed_ring.append(finding)
                         yield {"type": "finding", "agent_id": result["agent_id"],
-                               "text": text,
+                               "text": finding,
                                "score_delta": round(score - best_score, 4),
                                "total_findings": len(all_findings)}
 
@@ -220,6 +224,11 @@ class HookEvaluator:
 
                 improvement = gen_best - best_score
                 best_score = max(best_score, gen_best)
+                # Detect population collapse: all variants scored identically — parametric
+                # mutations produced no differentiation, no point running more gens.
+                score_spread = max(x["score"] for x in scored) - min(x["score"] for x in scored)
+                if score_spread < 0.001:
+                    stagnation += 1
                 stagnation = stagnation + 1 if improvement < 0.01 else 0
 
                 # Milestone C: propose new scenarios every gen, prune stale ones.
