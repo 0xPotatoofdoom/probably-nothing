@@ -217,23 +217,20 @@ contract Scenario_WorkingExample is PNBase {
 _HOOK_CALL_WARNING = """\
 ═══ HOOK CALL ANTI-PATTERNS (memorise — these cause EVERY run to fail) ═══
 
-  WRONG — do NOT call hook functions that are marked [HOOK INTERNAL] in the source:
-    hook.setDepegState(...);   ← marked [HOOK INTERNAL] → compile error
-    hook.registerPool(...);    ← marked [HOOK INTERNAL] → compile error
-    hook.getCurrentFee(...);   ← marked [HOOK INTERNAL] → compile error
+  WRONG — do NOT call hook functions marked [NOT CALLABLE] in the hook source:
+    Any call like hook.setDepegState(...) or hook.registerPool(...) will fail.
+    These functions are present for reading WHAT the hook does — not for calling.
 
-  WRONG (Error 9553 — Currency ≠ address):
-    address s = currency0;     ← Currency is NOT implicitly address
-
-  WRONG (Error 7920 — type not imported):
-    BalanceDelta delta = doSwap(-1 ether, true);  ← import BalanceDelta or use inline
+  WRONG (Error 9553/9640 — Currency ≠ address):
+    address s = currency0;       ← Currency is NOT implicitly address
+    address s = address(currency0); ← also invalid (Error 9640)
 
   RIGHT — test behavior indirectly, no hook calls with args:
     doSwap(-1 ether, true);                         ← tests the hook implicitly
-    int128 out = doSwap(-1 ether, true).amount1();  ← no import needed
+    int128 out = doSwap(-1 ether, true).amount1();
     uint256 tokenId = doAddLiquidity(-60, 60, 1 ether);
     sandwich(-0.5 ether, true, -0.1 ether);
-    // Read public state: hook.totalProtectedVolume(), hook.stalenessThreshold()
+    // Read zero-arg public state: hook.totalProtectedVolume(), hook.stalenessThreshold()
 
 """
 
@@ -270,10 +267,10 @@ def _safe_hook_source(source: str) -> str:
             params = param_m.group(1).strip() if param_m else ''
 
             if params:
-                # Has parameters — replace with a nameless stub and skip the body.
-                # Intentionally omits the function name so the LLM cannot generate
-                # a call to it (seeing "registerPool" → generates "hook.registerPool(...)").
-                out.append(f"{indent}// [HOOK INTERNAL — not testable directly]\n")
+                # Has parameters — replace with a named stub and skip the body.
+                # Show the function name so the LLM knows it exists but cannot see
+                # arg types. Combine with the _HOOK_CALL_WARNING to deter direct calls.
+                out.append(f"{indent}// [NOT CALLABLE — call from tests will fail] function {fn_name}(...)\n")
                 i = j + 1  # skip to line after closing paren of params
                 # Start with brace depth from sig_lines (handles '{' on same line as signature)
                 brace_depth = sum(sl.count('{') - sl.count('}') for sl in sig_lines)
