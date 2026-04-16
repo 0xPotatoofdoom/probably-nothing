@@ -769,13 +769,30 @@ class ScenarioProposer:
         #      Foundry uses assertNotEq, not assertNe. LLMs sometimes write assertNe.
         source = source.replace('assertNe(', 'assertNotEq(')
 
-        # 2j. Strip single-arg hook calls that pass poolId/poolKey — type mismatch (Error 9553)
-        #     hook.getCurrentFee(poolId) fails: PoolId can't convert to whatever the hook expects.
-        #     PoolId is type PoolId is bytes32, and most hook getters take address/bytes32 differently.
-        #     Safest fix: replace hook.fn(poolId) and hook.fn(poolKey) with a comment + 0.
+        # 2j. Strip single-arg hook calls with typed args — type mismatch (Error 9553)
+        #     hook.fn(poolId) / hook.fn(poolKey) / hook.fn(currency0) all fail:
+        #     PoolId/PoolKey/Currency types can't implicitly convert to address/bytes32.
         source = re.sub(
-            r'\bhook\.(\w+)\s*\(\s*(?:poolId|poolKey)\s*\)',
-            r'/* hook.\1(poolId/poolKey) — type mismatch, N/A */ 0',
+            r'\bhook\.(\w+)\s*\(\s*(?:poolId|poolKey|currency0|currency1)\s*\)',
+            r'/* hook.\1(typed_arg) — type mismatch, N/A */ 0',
+            source,
+        )
+
+        # 2j2. Strip positionManager.positions(...) — method doesn't exist (Error 9582)
+        #      Including tuple-destructuring form: (a,b,...) = positionManager.positions(id);
+        source = re.sub(
+            r'\([^)]*\)\s*=\s*positionManager\.positions\s*\([^)]*\)\s*;',
+            '/* positionManager.positions tuple removed */',
+            source,
+        )
+        source = re.sub(r'\bpositionManager\.positions\s*\([^)]*\)', '/* positions N/A */ 0', source)
+
+        # 2m. Fix assertEq/assertNotEq with a single stripped placeholder arg — Error 2314
+        #     After hook-call stripping, assertEq(/* ... */ 0; or assertEq(/* ... */ 0)
+        #     has only one arg. assertEq requires 2+ args; add 0 as second arg.
+        source = re.sub(
+            r'(assert(?:Eq|NotEq)\s*\(\s*/\*[^\n]*?\*/\s*0)\s*(?:\)|;)',
+            r'\1, 0);',
             source,
         )
 
