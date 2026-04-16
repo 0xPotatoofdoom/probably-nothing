@@ -171,7 +171,7 @@ def main() -> None:
     ap.add_argument("url", help="GitHub URL of a Uniswap V4 hook repo")
     ap.add_argument("--agents", "-a", type=int, default=6, help="Agent count (default: 6)")
     ap.add_argument("--skill", "-s", help="Path to a skill.md research seed file (20KB cap)")
-    ap.add_argument("--output", "-o", default="/out", help="Vault output directory (default: /out)")
+    ap.add_argument("--output", "-o", default=str(Path(__file__).parent.parent / "out"), help="Vault output directory (default: ../out)")
     ap.add_argument("--budget", type=float, help="Wall-clock budget in seconds (default: 300)")
     ap.add_argument("--json", action="store_true", help="Emit raw JSON events instead of pretty output")
     ap.add_argument("--quiet", "-q", action="store_true", help="Suppress per-variant WORK lines and duplicate 'Re-checking' findings")

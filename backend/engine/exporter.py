@@ -107,7 +107,8 @@ class VaultExporter:
     async def export(self, results: list, findings: list, github_url: str,
                      scenarios: Optional[list] = None, run_id: str = None) -> str:
         if not run_id:
-            run_id = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+            import uuid as _uuid
+            run_id = datetime.now().strftime("%Y-%m-%d-%H%M%S") + "-" + _uuid.uuid4().hex[:6]
 
         out_dir = Path(os.getenv("PN_VAULT_DIR", "/tmp/probably-nothing-vaults"))
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -120,7 +121,7 @@ class VaultExporter:
 
         # --- sources/ (immutable raw inputs) ---
         sources_dir = vault_path / "sources"
-        sources_dir.mkdir()
+        sources_dir.mkdir(exist_ok=True)
         if best.get("source"):
             (sources_dir / "hook-source.sol").write_text(best["source"])
         (sources_dir / "run-metadata.json").write_text(json.dumps({
@@ -169,7 +170,7 @@ class VaultExporter:
 
         # Per-agent entity files
         agents_dir = entities_dir / "agents"
-        agents_dir.mkdir()
+        agents_dir.mkdir(exist_ok=True)
         agent_findings = {}
         for f in findings:
             aid = f.get("agent_id", "unknown") if isinstance(f, dict) else "unknown"
@@ -189,7 +190,7 @@ class VaultExporter:
 
         # Variants
         variants_dir = entities_dir / "variants"
-        variants_dir.mkdir()
+        variants_dir.mkdir(exist_ok=True)
         for i, r in enumerate(results[:10]):  # top 10
             (variants_dir / f"variant-{i+1:03d}.md").write_text(
                 frontmatter("agent", r.get("score", 0), run_id,
@@ -200,7 +201,7 @@ class VaultExporter:
 
         # --- wiki/synthesis/ (where human promotion happens) ---
         synthesis_dir = vault_path / "wiki" / "synthesis"
-        synthesis_dir.mkdir()
+        synthesis_dir.mkdir(exist_ok=True)
 
         all_finding_texts = [f.get("text", str(f)) if isinstance(f, dict) else str(f) for f in findings]
 
@@ -231,7 +232,7 @@ class VaultExporter:
 
         # --- generations/ ---
         gen_dir = vault_path / "generations"
-        gen_dir.mkdir()
+        gen_dir.mkdir(exist_ok=True)
         (gen_dir / "gen-001.md").write_text(
             frontmatter("agent", best_score, run_id) +
             f"# Generation 1\n\n**Best score:** {best_score:.4f}\n**Variants:** {len(results)}\n\n" +
@@ -269,7 +270,7 @@ class VaultExporter:
 
         # --- best-variant/ ---
         best_dir = vault_path / "best-variant"
-        best_dir.mkdir()
+        best_dir.mkdir(exist_ok=True)
         if best.get("source"):
             (best_dir / "Hook.sol").write_text(best["source"])
 
@@ -301,7 +302,7 @@ class VaultExporter:
 
         # --- .obsidian/ ---
         obs_dir = vault_path / ".obsidian"
-        obs_dir.mkdir()
+        obs_dir.mkdir(exist_ok=True)
         (obs_dir / "app.json").write_text(json.dumps({
             "legacyEditor": False,
             "livePreview": True,

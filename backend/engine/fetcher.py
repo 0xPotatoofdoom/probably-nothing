@@ -47,7 +47,30 @@ class HookFetcher:
         renamed_source, original_name = _rename_primary_contract_to_hook(original_source)
         self.last_original_contract = original_name
 
-        ws = self._prepare_workspace(github_url, repo_dir)
+        ws = self._prepare_workspace(github_url, repo_dir, hook_path)
+
+        # If the hook was in a subdirectory of src/ (e.g. src/hooks/ClankerHook.sol),
+        # its relative imports were written relative to that subdir.  Moving it to
+        # src/Hook.sol changes resolution — rewrite imports so they still resolve.
+        src_root = repo_dir / "src"
+        if src_root.exists() and hook_path.is_relative_to(src_root):
+            original_rel_dir = hook_path.parent.relative_to(src_root)
+            if str(original_rel_dir) != ".":
+                renamed_source = _rewrite_relative_imports(
+                    renamed_source,
+                    original_dir=Path("src") / original_rel_dir,
+                    new_dir=Path("src"),
+                )
+        elif not (src_root.exists() and hook_path.is_relative_to(src_root)):
+            # Hook is outside repo's src/ (e.g. hook/src/ or contracts/).
+            # Rewrite imports relative to its actual parent → workspace src/.
+            hook_dir = hook_path.parent
+            renamed_source = _rewrite_relative_imports(
+                renamed_source,
+                original_dir=Path("src") / hook_dir.name,  # approximation
+                new_dir=Path("src"),
+            )
+
         (ws / "src" / "Hook.sol").write_text(renamed_source)
         self.last_workspace = ws
         return renamed_source
@@ -131,13 +154,14 @@ class HookFetcher:
 
         return (candidates or sol_files)[0]
 
-    def _prepare_workspace(self, github_url: str, repo_dir: Path) -> Path:
+    def _prepare_workspace(self, github_url: str, repo_dir: Path, hook_path: Optional[Path] = None) -> Path:
         """
         Build (or reuse) a per-URL workspace:
           1. Bootstrap from the Docker image on first call.
           2. Merge user's lib/ into workspace lib/ (additive — no overwrites).
           3. Copy user's src/ into workspace src/ so internal imports resolve.
           4. Write remappings.txt so @alias/ paths compile correctly.
+          5. Fix case-sensitivity mismatches in relative imports.
         """
         WORKSPACE_CACHE.mkdir(parents=True, exist_ok=True)
         digest = hashlib.sha256(github_url.encode()).hexdigest()[:16]
@@ -148,6 +172,9 @@ class HookFetcher:
             _bootstrap_from_image(dest)
 
         # Step 2: Merge user's lib/ subdirectories that are absent from workspace.
+        # Also redirect stale nested copies of standard libs (openzeppelin-contracts,
+        # solmate, forge-std) to the user's version when the user ships a newer one —
+        # this fixes repos like Clanker that need OZ 5.1+ while the workspace has 5.0.x.
         user_lib = repo_dir / "lib"
         if user_lib.exists():
             ws_lib = dest / "lib"
@@ -158,16 +185,17 @@ class HookFetcher:
                         shutil.copytree(str(entry), str(target))
                     except Exception:
                         pass  # best-effort
+            # For known standard libs, redirect stale nested copies to user's version.
+            _redirect_nested_libs(user_lib, ws_lib)
 
         # Step 3: Copy user's src/ into workspace src/ so internal @alias/ imports work.
         # We copy additive-only so our scaffolding (Hook.sol) is never overwritten here
         # (it's written later by _sync). Only .sol files; skip test/script dirs.
-        user_src = repo_dir / "src"
-        if user_src.exists():
-            ws_src = dest / "src"
-            for item in user_src.rglob("*.sol"):
-                rel = item.relative_to(user_src)
-                # Skip test/script subtrees from user's repo.
+        ws_src = dest / "src"
+
+        def _copy_sol_dir(src_dir: Path) -> None:
+            for item in src_dir.rglob("*.sol"):
+                rel = item.relative_to(src_dir)
                 parts = rel.parts
                 if any(p in ("test", "tests", "script", "scripts") for p in parts):
                     continue
@@ -176,10 +204,148 @@ class HookFetcher:
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(str(item), str(target))
 
+        user_src = repo_dir / "src"
+        if user_src.exists():
+            _copy_sol_dir(user_src)
+
+        # Also copy from the hook's actual parent directory when the hook lives
+        # outside the repo's standard src/ (e.g. hook/src/, contracts/).
+        if hook_path is not None:
+            hook_src_dir = hook_path.parent
+            if not (user_src.exists() and hook_path.is_relative_to(user_src)):
+                _copy_sol_dir(hook_src_dir)
+
         # Step 4: Write remappings.txt with user's remappings merged with workspace ones.
         _write_remappings_txt(repo_dir, dest)
 
+        # Step 5: Fix case-sensitivity mismatches in relative imports.
+        # Repos developed on macOS often have import paths that differ in case from
+        # the actual filenames (e.g. "IClankerLpLocker.sol" vs "IClankerLPLocker.sol").
+        # On Linux these fail to resolve — create symlinks to the actual files.
+        _fix_case_mismatches(dest / "src")
+
         return dest
+
+
+# ─── import path helpers ───────────────────────────────────────────────────────
+
+_IMPORT_PATH_RE = re.compile(r'import\s+[^"\']*["\']([^"\']+)["\']')
+_IMPORT_REWRITE_RE = re.compile(r'(import\s+[^"\']*["\'])([^"\']+)(["\'])')
+
+
+def _redirect_nested_libs(user_lib: Path, ws_lib: Path) -> None:
+    """
+    When the user supplies a NEWER version of a standard lib (openzeppelin-contracts,
+    solmate, forge-std), replace stale copies of that lib nested inside workspace libs
+    (e.g. lib/uniswap-hooks/lib/v4-core/lib/openzeppelin-contracts) with a relative
+    symlink to the user's copy.  This fixes version-conflict compile errors like
+    "Hashes.sol not found" when a repo needs OZ ≥ 5.1 but the workspace has 5.0.x.
+
+    Only redirects if the user's copy exists AND appears to contain more files than the
+    workspace's nested copy (a lightweight "newer" heuristic).
+    """
+    # Standard libs that can safely be unified across the dep tree.
+    _STANDARD_LIBS = {"openzeppelin-contracts", "solmate", "forge-std"}
+
+    for lib_name in _STANDARD_LIBS:
+        user_copy = user_lib / lib_name
+        if not user_copy.is_dir():
+            continue
+        ws_top = ws_lib / lib_name  # may not exist — that's fine
+        user_file_count = sum(1 for _ in user_copy.rglob("*.sol"))
+
+        # Walk the workspace libs looking for stale nested copies.
+        for nested in ws_lib.rglob(lib_name):
+            if not nested.is_dir() or nested == ws_top:
+                continue  # skip the top-level copy (already merged)
+            nested_file_count = sum(1 for _ in nested.rglob("*.sol"))
+            # Only replace if user has meaningfully more files (newer version).
+            if user_file_count <= nested_file_count:
+                continue
+            try:
+                shutil.rmtree(str(nested))
+                # Relative symlink so it works inside Docker.
+                rel_target = os.path.relpath(str(ws_top if ws_top.exists() else user_copy), str(nested.parent))
+                nested.symlink_to(rel_target)
+            except Exception:
+                pass  # best-effort
+
+
+def _rewrite_relative_imports(source: str, original_dir: Path, new_dir: Path) -> str:
+    """
+    Rewrite relative imports so they resolve correctly from new_dir instead of
+    original_dir.  Used when a hook file is moved from src/<subdir>/Hook.sol to
+    src/Hook.sol — without this, '../Foo.sol' would go one level too high.
+
+    Both original_dir and new_dir should be relative paths from the workspace root
+    (e.g. Path("src/hooks") and Path("src")).
+    """
+    if original_dir == new_dir:
+        return source
+
+    def rewrite(m: re.Match) -> str:
+        prefix, raw, suffix = m.group(1), m.group(2), m.group(3)
+        if not (raw.startswith("./") or raw.startswith("../")):
+            return m.group(0)  # non-relative (e.g. @uniswap/…), leave as-is
+        try:
+            # Resolve the import from the original location (using pure POSIX paths).
+            resolved = os.path.normpath(str(original_dir / raw))
+            # Express relative to the new location.
+            new_rel = os.path.relpath(resolved, str(new_dir))
+            if not new_rel.startswith("../"):
+                new_rel = "./" + new_rel
+            return prefix + new_rel + suffix
+        except Exception:
+            return m.group(0)
+
+    return _IMPORT_REWRITE_RE.sub(rewrite, source)
+
+
+def _fix_case_mismatches(src_dir: Path) -> None:
+    """
+    Create symlinks for relative imports whose filename case doesn't match the
+    actual file on disk.  Repos developed on macOS (case-insensitive FS) often
+    have e.g. `import "…/IClankerLpLocker.sol"` where the real file is
+    `IClankerLPLocker.sol`.  On Linux this fails; a symlink fixes it silently.
+    """
+    if not src_dir.exists():
+        return
+
+    sol_files = list(src_dir.rglob("*.sol"))
+
+    # Build a map: lowercase_absolute_path → actual_Path for all files.
+    case_map: dict[str, Path] = {}
+    for f in sol_files:
+        case_map[str(f).lower()] = f
+
+    for f in sol_files:
+        try:
+            content = f.read_text(errors="ignore")
+        except Exception:
+            continue
+        for m in _IMPORT_PATH_RE.finditer(content):
+            raw = m.group(1)
+            if not raw.startswith("./") and not raw.startswith("../"):
+                continue
+            # Resolve the import path relative to the current file.
+            try:
+                resolved = (f.parent / raw).resolve()
+            except Exception:
+                continue
+            if resolved.exists():
+                continue
+            lower = str(resolved).lower()
+            actual = case_map.get(lower)
+            if actual is None:
+                continue
+            try:
+                resolved.parent.mkdir(parents=True, exist_ok=True)
+                # Use a relative symlink so it works inside Docker where the
+                # workspace is mounted at a different absolute path than the host.
+                rel_target = os.path.relpath(actual, resolved.parent)
+                resolved.symlink_to(rel_target)
+            except Exception:
+                pass  # best-effort
 
 
 # ─── workspace bootstrap ───────────────────────────────────────────────────────

@@ -86,11 +86,23 @@ class FoundryHarness:
                 None, self._sync, source, agent, scenarios or []
             )
 
+    # Local test-base template, updated more often than the Docker image.
+    _TEMPLATE_BASE = Path(__file__).parent.parent / "foundry_workspace" / "test" / "base"
+
     def _sync(self, source: str, agent: dict, scenarios: list) -> dict:
         hook_path = self.workspace / "src" / "Hook.sol"
         hook_path.write_text(source)
-        # Flags + ctor pattern written per-variant so HookMiner lines up with new bytecode.
-        self._write_flags(self._parse_flags(source), self._detect_ctor_pattern(source))
+        # Sync the local test/base template files into the workspace so edits to
+        # PNBase.t.sol propagate without requiring a Docker image rebuild.
+        ws_base = self.workspace / "test" / "base"
+        ws_base.mkdir(parents=True, exist_ok=True)
+        for tpl in self._TEMPLATE_BASE.glob("*.sol"):
+            if tpl.name == "HookConfig.sol":
+                continue  # written below by _write_flags
+            dest = ws_base / tpl.name
+            dest.write_text(tpl.read_text())
+        # Flags + ctor pattern + fee written per-variant so HookMiner lines up with new bytecode.
+        self._write_flags(self._parse_flags(source), source, self._uses_dynamic_fee(source))
 
         match_expr = _forge_match(scenarios)
         # Note: `--gas-report` replaces forge's --json output with a gas table —
@@ -144,6 +156,15 @@ class FoundryHarness:
             "findings": _generate_findings(metrics, agent),
         }
 
+    def _uses_dynamic_fee(self, source: str) -> bool:
+        """Return True if the hook requires a dynamic-fee pool."""
+        return bool(
+            re.search(r'isDynamicFee\s*\(', source) or
+            re.search(r'DYNAMIC_FEE_FLAG', source) or
+            re.search(r'LPFeeLibrary\.DYNAMIC', source) or
+            re.search(r'updateDynamicLPFee\s*\(', source)
+        )
+
     def _parse_flags(self, source: str) -> int:
         """Crude regex over getHookPermissions() — good enough for standard V4 hooks."""
         flag_bits = {
@@ -166,46 +187,100 @@ class FoundryHarness:
         for name, bit in flag_bits.items():
             if re.search(rf"\b{name}\s*:\s*true\b", source):
                 flags |= bit
+        # Fallback: if no flags found via struct pattern, detect hooks that directly
+        # implement IHooks callbacks (function beforeSwap(...), etc.) without BaseHook.
+        if flags == 0:
+            for name, bit in flag_bits.items():
+                # Match "function beforeSwap(" or "function _beforeSwap(" patterns
+                if re.search(rf"\bfunction _?{name}\s*\(", source):
+                    flags |= bit
         return flags
 
-    def _detect_ctor_pattern(self, source: str) -> int:
+    # ── constructor-arg helpers ────────────────────────────────────────────────
+
+    _UINT_RE = re.compile(r'^uint(\d*)$')
+    _INT_RE  = re.compile(r'^int(\d*)$')
+
+    def _sol_default(self, base_type: str) -> str:
+        """Return a Solidity default-value literal for a given base type."""
+        if base_type == "bool":
+            return "false"
+        if base_type == "bytes32":
+            return "bytes32(0)"
+        if base_type.startswith("bytes"):
+            # fixed bytesN
+            try:
+                int(base_type[5:])
+                return f"{base_type}(0)"
+            except ValueError:
+                return 'bytes("")'
+        if self._UINT_RE.match(base_type):
+            bits = self._UINT_RE.match(base_type).group(1) or "256"
+            # Use 1 not 0 — many hooks validate > 0 for windows, intervals, etc.
+            return f"uint{bits}(1)"
+        if self._INT_RE.match(base_type):
+            bits = self._INT_RE.match(base_type).group(1) or "256"
+            return f"int{bits}(0)"
+        # Default: treat as address (covers interfaces, contract refs, address)
+        return "address(0)"
+
+    def _parse_ctor_args(self, source: str) -> list[str]:
         """
-        Detect constructor signature to pick the right CTOR_PATTERN.
-        Returns:
-          0 — constructor(IPoolManager)                      (standard)
-          1 — constructor(IPoolManager, address ...)         (+ owner/address arg)
-          2 — constructor(IPoolManager, address, uint24 ...) (+ owner + fee)
-        Falls back to 0 (standard) if constructor is unrecognised or absent.
+        Parse constructor signature and return a list of Solidity default-value
+        literals for each parameter.
+
+        Address/interface stubs use 'testAddr' (passed in from PNBase as address(this))
+        so OZ v5 Ownable doesn't revert on address(0) checks.
+        Returns ['address(poolManager)'] if the constructor is absent or non-standard.
         """
         m = re.search(r'constructor\s*\(([^)]*)\)', source)
         if not m:
-            return 0
-        args = [a.strip() for a in m.group(1).split(",") if a.strip()]
-        # Check first arg is IPoolManager (standard) or something else entirely.
-        if not args or "IPoolManager" not in args[0]:
-            # Non-standard first arg — we can't auto-deploy, fall back to pattern 0
-            # and let the test fail gracefully rather than providing garbage args.
-            return 0
-        if len(args) == 1:
-            return 0
-        if len(args) >= 3 and any("uint" in a for a in args[2:3]):
-            return 2
-        if len(args) >= 2 and any("address" in a for a in args[1:2]):
-            return 1
-        return 0
+            return ["address(poolManager)"]
+        raw = m.group(1).strip()
+        if not raw:
+            return []  # no-arg constructor (unusual for hooks)
+        params = [p.strip() for p in raw.split(",") if p.strip()]
+        if not params or "IPoolManager" not in params[0]:
+            # Non-standard first arg — provide correct-length encoding with testAddr
+            # stubs so at least the ABI layout is right.
+            result = []
+            for p in params:
+                parts = p.split()
+                base = parts[0] if parts else "address"
+                result.append(self._sol_default(base))
+            if result:
+                result[0] = "address(poolManager)"
+            return result
+        # Standard: first param is IPoolManager; remainder get address stubs
+        defaults = ["address(poolManager)"]
+        for p in params[1:]:
+            parts = p.split()
+            base = parts[0] if parts else "address"
+            val = self._sol_default(base)
+            # Replace address(0) stubs with testAddr to avoid OZ Ownable revert
+            if val == "address(0)":
+                val = "testAddr"
+            defaults.append(val)
+        return defaults
 
-    def _write_flags(self, flags: int, ctor_pattern: int = 0) -> None:
+    # DYNAMIC_FEE_FLAG = 0x800000 — must match LPFeeLibrary.DYNAMIC_FEE_FLAG
+    _DYNAMIC_FEE_FLAG = 0x800000
+
+    def _write_flags(self, flags: int, source: str = "", dynamic_fee: bool = False) -> None:
+        ctor_args = self._parse_ctor_args(source)
+        encode_args = ", ".join(ctor_args) if ctor_args else ""
+        fee_val = self._DYNAMIC_FEE_FLAG if dynamic_fee else 3000
         cfg = self.workspace / "test" / "base" / "HookConfig.sol"
         cfg.write_text(
             "// SPDX-License-Identifier: MIT\n"
             "pragma solidity ^0.8.26;\n\n"
             "library HookConfig {\n"
             f"    uint160 internal constant FLAGS = uint160({flags});\n"
-            f"    uint8 internal constant CTOR_PATTERN = {ctor_pattern};\n\n"
-            "    function ctorArgs(address poolManager) internal pure returns (bytes memory) {\n"
-            "        if (CTOR_PATTERN == 1) return abi.encode(poolManager, address(0));\n"
-            "        if (CTOR_PATTERN == 2) return abi.encode(poolManager, address(0), uint24(3000));\n"
-            "        return abi.encode(poolManager);\n"
+            f"    uint24 internal constant FEE = uint24({fee_val});\n\n"
+            # Always accept (poolManager, testAddr) — PNBase always passes both.
+            # When the hook only needs poolManager, testAddr is declared but unused.
+            "    function ctorArgs(address poolManager, address testAddr) internal pure returns (bytes memory) {\n"
+            f"        return abi.encode({encode_args});\n"
             "    }\n"
             "}\n"
         )
