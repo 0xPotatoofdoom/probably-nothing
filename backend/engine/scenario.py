@@ -754,8 +754,8 @@ class ScenarioProposer:
         if _uint_vars:
             _uint_pat = '|'.join(_uint_vars)
             source = re.sub(
-                r'\bdoSwap\s*\(\s*-(' + _uint_pat + r')\s*,',
-                lambda m: f'doSwap(-int128({m.group(1)}),',
+                r'\b(do\w+)\s*\(\s*-(' + _uint_pat + r')\s*,',
+                lambda m: f'{m.group(1)}(-int128({m.group(2)}),',
                 source,
             )
 
@@ -868,6 +868,10 @@ class ScenarioProposer:
         # 2q. Fix `byte(expr)` → `bytes1(uint8(expr))` (Error 6933)
         #     `byte` type was removed in Solidity 0.8+; replaced by `bytes1`.
         source = re.sub(r'\bbyte\(([^)]+)\)', r'bytes1(uint8(\1))', source)
+
+        # 2v. Replace deployCurrency() — not a PNBase helper (Error 7920)
+        #     PNBase exposes currency0/currency1; deployCurrency() doesn't exist.
+        source = source.replace('deployCurrency()', 'currency0')
 
         # 2r. Strip all-blank tuple destructuring `(, , ) = expr;` (Error 6933)
         #     LLMs sometimes discard all return values via (,,) = fn(); which is invalid.
