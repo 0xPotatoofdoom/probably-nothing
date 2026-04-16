@@ -211,6 +211,30 @@ contract Scenario_WorkingExample is PNBase {
   - Reentrancy surface: rapid sequential swaps checking no state corruption
 """
 
+# Anti-pattern block injected before every hook source to deter the single most
+# common class of failures: calling hook functions with wrong argument types.
+_HOOK_CALL_WARNING = """\
+═══ HOOK CALL ANTI-PATTERNS (memorise — these cause EVERY run to fail) ═══
+
+The following patterns look reasonable but ALWAYS produce compile errors.
+Do NOT write them. No exceptions.
+
+  WRONG (Error 9553 — Currency ≠ address):
+    hook.registerPool(poolKey, currency0);     ← currency0 is Currency, not address
+    hook.setDepegState(currency0, 1, 100);     ← Currency ≠ address; 1 ≠ enum
+    address s = currency0;                     ← Currency is NOT implicitly address
+
+  WRONG (Error 7920 — BalanceDelta not imported):
+    BalanceDelta delta = doSwap(-1 ether, true);  ← missing import → compile error
+
+  RIGHT — test behavior indirectly, no hook calls with args:
+    doSwap(-1 ether, true);                    ← tests the hook implicitly
+    int128 out = doSwap(-1 ether, true).amount1();  ← no BalanceDelta import needed
+    uint256 tokenId = doAddLiquidity(-60, 60, 1 ether);
+    sandwich(-0.5 ether, true, -0.1 ether);
+
+"""
+
 
 @dataclass
 class Scenario:
@@ -641,6 +665,7 @@ class ScenarioProposer:
             f"{V4_PRIMER_HEADER}\n\n"
             f"{pnbase_block}"
             f"{V4_PRIMER_RULES}\n\n"
+            f"{_HOOK_CALL_WARNING}"
             f"{security_block}"
             f"{skill_block}"
             f"═══ PERSONA: {persona.label} ═══\n\n"
@@ -695,6 +720,7 @@ class ScenarioProposer:
             f"{V4_PRIMER_HEADER}\n\n"
             f"{pnbase_block}"
             f"{V4_PRIMER_RULES}\n\n"
+            f"{_HOOK_CALL_WARNING}"
             f"{security_block}"
             f"{skill_block}"
             f"═══ HOOK UNDER TEST (src/Hook.sol) ═══\n\n"
