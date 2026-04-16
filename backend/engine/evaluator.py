@@ -30,7 +30,7 @@ from .llm import build_llm
 from .scenario import ScenarioPool, ScenarioProposer
 
 
-WALL_BUDGET_SECONDS = float(os.getenv("PN_WALL_BUDGET", "300"))
+WALL_BUDGET_SECONDS = float(os.getenv("PN_WALL_BUDGET", "600"))
 MAX_CONCURRENT_VARIANTS = int(os.getenv("PN_MAX_CONCURRENCY", "12"))
 SKILL_MD_CAP_BYTES = 20 * 1024
 SEED_RING_SIZE = 32
@@ -246,9 +246,9 @@ class HookEvaluator:
                     if tier == "parametric" and llm_attempts == 0:
                         tier = "llm"
                         llm_attempts += 1
-                        yield {"type": "status", "message": "Parametric tier converged. Requesting LLM-assisted mutations..."}
                         remaining = max(0.0, deadline - time.monotonic())
-                        llm_timeout = min(60.0, remaining)
+                        llm_timeout = min(180.0, remaining)
+                        yield {"type": "status", "message": f"Parametric tier converged. Requesting LLM-assisted mutations (budget={remaining:.0f}s, timeout={llm_timeout:.0f}s)..."}
                         if llm_timeout < 5.0:
                             yield {"type": "status", "message": "No budget left for LLM tier — stopping."}
                             break

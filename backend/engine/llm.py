@@ -56,7 +56,7 @@ class OllamaLLM:
             "model": self.model,
             "prompt": prompt,
             "stream": False,
-            "options": {"temperature": 0.4, "num_predict": 1024},
+            "options": {"temperature": 0.4, "num_predict": 8192},
         }
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
