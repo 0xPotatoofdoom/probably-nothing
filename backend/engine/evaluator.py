@@ -101,10 +101,12 @@ class HookEvaluator:
                 proposer = ScenarioProposer(self.llm, workspace, pool)
 
                 if harness.mode == "foundry":
-                    yield {"type": "status", "message": "Loading V4 security reference from uniswap-ai..."}
+                    yield {"type": "status", "message": "Loading V4 security reference from uniswap-ai + ethskills..."}
                     await proposer._ensure_security_context()
                     ctx_size = len(proposer._security_context or "")
                     yield {"type": "status", "message": f"Security context: {ctx_size:,} chars loaded." if ctx_size else "Security context: unavailable (offline?), continuing without."}
+                    # Merge fetched security context into skill_md so mutator + proposer share the same signal
+                    skill_md = "\n\n".join(filter(None, [skill_md, proposer._security_context]))[:SKILL_MD_CAP_BYTES] or None
                     # Inject prior knowledge into seed proposals
                     prior_ctx = self.knowledge.get_prior_context(github_url, patterns=[])
                     seed_skill = "\n\n".join(filter(None, [skill_md, prior_ctx]))
