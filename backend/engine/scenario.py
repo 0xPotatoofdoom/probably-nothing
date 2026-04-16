@@ -300,6 +300,21 @@ def _safe_hook_source(source: str) -> str:
             out.append(f"{indent}// [ENUM {enum_name} — NOT accessible from tests, do not reference]\n")
             continue
 
+        # Strip struct definitions — struct types are hook-internal and cannot be
+        # imported in tests. Showing them causes LLMs to declare `StructType memory x = ...`
+        # which fails with Error 7920 (identifier not found).
+        struct_start = re.match(r'(\s*)struct\s+(\w+)\s*\{', ln)
+        if struct_start:
+            indent = struct_start.group(1)
+            struct_name = struct_start.group(2)
+            depth = ln.count('{') - ln.count('}')
+            i += 1
+            while i < len(lines) and depth > 0:
+                depth += lines[i].count('{') - lines[i].count('}')
+                i += 1
+            out.append(f"{indent}// [STRUCT {struct_name} — NOT accessible from tests, do not use as type]\n")
+            continue
+
         # Strip `constant` state variable declarations
         # Matches: `type public constant NAME = value;` or `type constant NAME = value;`
         const_m = re.match(r'(\s*\w[\w\s*]*\bconstant\b.*?;)', ln)
@@ -782,6 +797,13 @@ class ScenarioProposer:
             source,
         )
 
+        # 2j3_. Strip `_ = expr;` — discard variable not valid in Solidity (Error 7576)
+        source = re.sub(r'^\s*_\s*=\s*[^;]+;\s*$', '', source, flags=re.MULTILINE)
+
+        # 2j3a. Strip currency0/currency1.mint(...) — Currency has no .mint() (Error 9582)
+        #       PNBase pre-funds currencies; tests don't need to mint.
+        source = re.sub(r'\bcurrency[01]\.mint\s*\([^;]*\)\s*;', '/* currency.mint N/A */', source)
+
         # 2j3b. Fix `address var = /* stripped */ 0;` → address(0) (Error 9574)
         #       Stripped hook calls leave int_const 0 which can't assign to address type.
         source = re.sub(
@@ -942,6 +964,9 @@ class ScenarioProposer:
             "IHooks": 'import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";',
             "TickMath": 'import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";',
             "Constants": 'import {Constants} from "@uniswap/v4-core/test/utils/Constants.sol";',
+            "PoolId": 'import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";',
+            "PoolKey": 'import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";',
+            "Currency": 'import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";',
         }
         for type_name, import_line in _AUTO_IMPORTS.items():
             if not re.search(r'\b' + type_name + r'\b', source):
