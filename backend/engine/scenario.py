@@ -647,6 +647,17 @@ class ScenarioProposer:
         2. Auto-inject known missing imports (Error 7920 for BalanceDelta/Hooks).
         These avoid burning a full LLM fix pass on easily fixable issues.
         """
+        # 0. Strip duplicate SPDX license identifiers (Error 3716)
+        #    LLMs sometimes include multiple // SPDX-License-Identifier: MIT lines.
+        #    Keep the first one, remove any subsequent ones.
+        _spdx_seen = [False]
+        def _dedup_spdx(m: re.Match) -> str:
+            if not _spdx_seen[0]:
+                _spdx_seen[0] = True
+                return m.group(0)
+            return ''
+        source = re.sub(r'//\s*SPDX-License-Identifier:[^\n]*\n?', _dedup_spdx, source)
+
         # 1. Replace Unicode punctuation that LLMs emit but Solidity strings can't contain
         source = (source
                   .replace('\u201c', '"').replace('\u201d', '"')   # " " curly double quotes
