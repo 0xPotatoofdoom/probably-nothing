@@ -787,15 +787,6 @@ class ScenarioProposer:
         )
         source = re.sub(r'\bpositionManager\.positions\s*\([^)]*\)', '/* positions N/A */ 0', source)
 
-        # 2m. Fix assertEq/assertNotEq with a single stripped placeholder arg — Error 2314
-        #     After hook-call stripping, assertEq(/* ... */ 0; or assertEq(/* ... */ 0)
-        #     has only one arg. assertEq requires 2+ args; add 0 as second arg.
-        source = re.sub(
-            r'(assert(?:Eq|NotEq)\s*\(\s*/\*[^\n]*?\*/\s*0)\s*(?:\)|;)',
-            r'\1, 0);',
-            source,
-        )
-
         # 2k. Strip try/catch around PNBase internal calls (Error 2536)
         #     PNBase helpers are internal — try/catch cannot wrap internal calls.
         #     Replace the entire try { body } catch { body } with just the call + ;
@@ -835,6 +826,34 @@ class ScenarioProposer:
         source = re.sub(
             r'\bhook\.(\w+)\s*\(([^)\n]*\S[^)\n]*)\)',
             _strip_multi_arg_hook_call,
+            source,
+        )
+
+        # 2m. Fix assertEq/assertNotEq with a single stripped placeholder arg — Error 2314
+        #     Must run AFTER 2b (which creates the /* ... NOT CALLABLE, removed */ 0 pattern).
+        #     assertEq(/* ... */ 0; or assertEq(/* ... */ 0) has only one arg.
+        #     assertEq requires 2+ args; add 0 as second arg and ensure closing paren.
+        source = re.sub(
+            r'(assert(?:Eq|NotEq)\s*\(\s*/\*[^\n]*?\*/\s*0)\s*(?:\)|;)',
+            r'\1, 0);',
+            source,
+        )
+
+        # 2n. Fix uint256(-int128_var) — Error 9640
+        #     Direct conversion from int128 to uint256 not allowed; need uint256(int256(x)).
+        #     Matches uint256(-varName) where varName is a simple identifier.
+        source = re.sub(
+            r'\buint256\(\s*-\s*(?!int(?:256|128)\()([a-zA-Z_]\w*)\s*\)',
+            r'uint256(int256(-\1))',
+            source,
+        )
+
+        # 2o. Strip hook.fn(numericLiteral) — type mismatch (Error 9553)
+        #     LLMs sometimes write hook.poolStablecoin(0) where PoolId is expected.
+        #     Literal 0 can't implicitly convert to PoolId/Currency/etc.
+        source = re.sub(
+            r'\bhook\.(\w+)\s*\(\s*\d+\s*\)',
+            r'/* hook.\1(literal_arg) — type mismatch, N/A */ 0',
             source,
         )
 
