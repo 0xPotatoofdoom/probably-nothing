@@ -28,20 +28,41 @@ import httpx
 from .llm import LLMClient
 
 
-# ─── uniswap-ai security context ───────────────────────────────────────────────
+# ─── security context sources ──────────────────────────────────────────────────
 
 _UNISWAP_AI_BASE = "https://raw.githubusercontent.com/Uniswap/uniswap-ai/main"
 _UNISWAP_AI_FILES = [
     "packages/plugins/uniswap-hooks/skills/v4-security-foundations/references/vulnerabilities-catalog.md",
     "packages/plugins/uniswap-hooks/skills/v4-security-foundations/references/audit-checklist.md",
 ]
-_UNISWAP_AI_CAP_BYTES = 12 * 1024  # cap total injected context at 12 KB
+
+_ETHSKILLS_AMM_URL = (
+    "https://raw.githubusercontent.com/austintgriffith/evm-audit-skills/main"
+    "/evm-audit-defi-amm/references/checklist.md"
+)
+
+_SECURITY_CTX_CAP_BYTES = 16 * 1024  # cap total injected context at 16 KB
 
 _uniswap_ai_context: Optional[str] = None
 
 
+def _extract_v4_hooks_section(md: str) -> str:
+    """Extract just the Uniswap V4 Hooks sections from a larger checklist."""
+    lines = md.splitlines()
+    in_section = False
+    extracted: List[str] = []
+    for line in lines:
+        if re.match(r"^##\s+Uniswap V4 Hooks", line):
+            in_section = True
+        elif in_section and re.match(r"^##\s+", line) and "Uniswap V4" not in line:
+            in_section = False
+        if in_section:
+            extracted.append(line)
+    return "\n".join(extracted)
+
+
 async def _load_uniswap_ai_context() -> str:
-    """Fetch security reference docs from uniswap-ai. Cached after first call."""
+    """Fetch security reference docs from uniswap-ai + ethskills AMM checklist. Cached."""
     global _uniswap_ai_context
     if _uniswap_ai_context is not None:
         return _uniswap_ai_context
@@ -53,9 +74,15 @@ async def _load_uniswap_ai_context() -> str:
                 r = await client.get(url)
                 if r.status_code == 200:
                     parts.append(r.text)
+            # Augment with the V4 hooks section from ethskills AMM checklist
+            r = await client.get(_ETHSKILLS_AMM_URL)
+            if r.status_code == 200:
+                v4_section = _extract_v4_hooks_section(r.text)
+                if v4_section:
+                    parts.append("## EthSkills — Uniswap V4 Hook Vulnerabilities\n\n" + v4_section)
     except Exception:
         pass  # network unavailable — proceed without
-    combined = "\n\n".join(parts)[:_UNISWAP_AI_CAP_BYTES]
+    combined = "\n\n".join(parts)[:_SECURITY_CTX_CAP_BYTES]
     _uniswap_ai_context = combined
     return combined
 
@@ -308,49 +335,62 @@ class ScenarioProposer:
         failed_examples: List[tuple[str, str]] = []  # (source_snippet, error)
 
         time_start = asyncio.get_event_loop().time()
-        time_limit = timeout * 0.7  # reserve 30% for fix attempts
 
-        prompt = self._build_prompt(hook_source, count, recent_findings, skill_md, failed_examples)
-        raw = await self.llm.complete(prompt, timeout=time_limit)
-        if not raw:
-            return [], []
+        # Ask for scenarios in small sub-batches of 2 so the model can actually
+        # complete all of them within the num_predict token budget. A 48GB
+        # thinking model generating 20 full Solidity contracts in one shot will
+        # exhaust tokens before finishing — 2 at a time is reliable.
+        SUB_BATCH = 2
+        remaining_count = count
+        while remaining_count > 0 and len(accepted) < count:
+            elapsed = asyncio.get_event_loop().time() - time_start
+            budget = timeout - elapsed - 5.0
+            if budget < 15.0:
+                break
+            sub_count = min(SUB_BATCH, remaining_count)
+            time_limit = budget * 0.65  # reserve 35% for fix attempts
+            prompt = self._build_prompt(hook_source, sub_count, recent_findings, skill_md, failed_examples)
+            raw = await self.llm.complete(prompt, timeout=time_limit)
+            if not raw:
+                break
+            remaining_count -= sub_count
 
-        for source in _split_scenarios(raw):
-            name = _extract_contract_name(source)
-            if not name:
-                rejections.append("no contract name found")
-                continue
-            if name in {s.contract_name for s in self.pool.all()}:
-                rejections.append(f"{name}: duplicate")
-                continue
-            ok, reason = await self._compile_gate(name, source)
-            if not ok:
-                # Attempt one fix pass with the compiler error as feedback
-                elapsed = asyncio.get_event_loop().time() - time_start
-                fix_budget = timeout - elapsed - 5.0
-                if fix_budget > 15.0:
-                    fixed = await self._fix_scenario(name, source, reason, hook_source, fix_budget)
-                    if fixed:
-                        ok2, reason2 = await self._compile_gate(name, fixed)
-                        if ok2:
-                            source = fixed
-                            ok = True
-                        else:
-                            reason = reason2
-                if not ok:
-                    failed_examples.append((source[:400], reason))
-                    rejections.append(f"{name}: {reason}")
+            for source in _split_scenarios(raw):
+                name = _extract_contract_name(source)
+                if not name:
+                    rejections.append("no contract name found")
                     continue
-            scenario = Scenario(
-                scenario_id=f"llm::{name}",
-                contract_name=name,
-                filename=f"{name}.t.sol",
-                source=source,
-                proposer="llm",
-                gen_created=gen,
-            )
-            self.pool.add(scenario)
-            accepted.append(scenario)
+                if name in {s.contract_name for s in self.pool.all()}:
+                    rejections.append(f"{name}: duplicate")
+                    continue
+                ok, reason = await self._compile_gate(name, source)
+                if not ok:
+                    # Attempt one fix pass with the compiler error as feedback
+                    elapsed = asyncio.get_event_loop().time() - time_start
+                    fix_budget = timeout - elapsed - 5.0
+                    if fix_budget > 15.0:
+                        fixed = await self._fix_scenario(name, source, reason, hook_source, fix_budget)
+                        if fixed:
+                            ok2, reason2 = await self._compile_gate(name, fixed)
+                            if ok2:
+                                source = fixed
+                                ok = True
+                            else:
+                                reason = reason2
+                    if not ok:
+                        failed_examples.append((source[:400], reason))
+                        rejections.append(f"{name}: {reason}")
+                        continue
+                scenario = Scenario(
+                    scenario_id=f"llm::{name}",
+                    contract_name=name,
+                    filename=f"{name}.t.sol",
+                    source=source,
+                    proposer="llm",
+                    gen_created=gen,
+                )
+                self.pool.add(scenario)
+                accepted.append(scenario)
         return accepted, rejections
 
     async def _fix_scenario(
