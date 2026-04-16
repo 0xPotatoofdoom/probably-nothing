@@ -829,13 +829,13 @@ class ScenarioProposer:
             source,
         )
 
-        # 2m. Fix assertEq/assertNotEq with a single stripped placeholder arg — Error 2314
+        # 2m. Fix assertEq/assertNotEq with a single stripped placeholder arg — Error 2314/4487
         #     Must run AFTER 2b (which creates the /* ... NOT CALLABLE, removed */ 0 pattern).
         #     assertEq(/* ... */ 0; or assertEq(/* ... */ 0) has only one arg.
-        #     assertEq requires 2+ args; add 0 as second arg and ensure closing paren.
+        #     assertEq(0, 0) then causes 4487 (ambiguous overload) — use assertTrue(true) instead.
         source = re.sub(
-            r'(assert(?:Eq|NotEq)\s*\(\s*/\*[^\n]*?\*/\s*0)\s*(?:\)|;)',
-            r'\1, 0);',
+            r'assert(?:Eq|NotEq)\s*\(\s*/\*[^\n]*?\*/\s*0\s*(?:\)|;)',
+            'assertTrue(true); // assertion stripped',
             source,
         )
 
@@ -856,6 +856,11 @@ class ScenarioProposer:
             r'/* hook.\1(literal_arg) — type mismatch, N/A */ 0',
             source,
         )
+
+        # 2p. Fix trailing commas in struct/function calls (Error 2074)
+        #     Solidity doesn't allow trailing commas: `{ field: val, }` is invalid.
+        #     Remove commas immediately before a closing brace (with optional comment).
+        source = re.sub(r',(\s*(?://[^\n]*)?\s*\n\s*\})', r'\1', source)
 
         # 3. Auto-inject / normalise known imports.
         #    Problem: LLMs often import from wrong paths (e.g. "lib/uniswap-hooks/..." or relative
