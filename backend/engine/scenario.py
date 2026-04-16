@@ -538,9 +538,12 @@ class ScenarioProposer:
             raw = await self.llm.complete(prompt, timeout=time_limit)
             if not raw:
                 break
-            remaining_count -= sub_count
+            parsed = list(_split_scenarios(raw))
+            # Decrement by how many were actually parsed (min 1 to prevent infinite loop).
+            # Allows retry when the LLM returns fewer scenarios than requested.
+            remaining_count -= max(1, len(parsed))
 
-            for source in _split_scenarios(raw):
+            for source in parsed:
                 name = _extract_contract_name(source)
                 if not name:
                     rejections.append("no contract name found")
@@ -682,8 +685,9 @@ class ScenarioProposer:
         source = re.sub(r'\{value:\s*[^}]+\}', '', source)
 
         # 2c. Remove .toString() calls — numeric types have no toString() in Solidity (Error 9582)
-        #     LLMs write JS-style: i.toString() — not valid in Solidity.
+        #     Also replace .amountSpecified() on BalanceDelta → .amount1() (9582).
         source = re.sub(r'\.toString\(\)', '', source)
+        source = re.sub(r'\.amountSpecified\(\)', '.amount1()', source)
 
         # 2d. Strip JS-style string concatenation with + (Error 2271)
         #     Solidity does not support "str" + expr or expr + "str".
@@ -769,11 +773,11 @@ class ScenarioProposer:
         #      Foundry uses assertNotEq, not assertNe. LLMs sometimes write assertNe.
         source = source.replace('assertNe(', 'assertNotEq(')
 
-        # 2j. Strip single-arg hook calls with typed args — type mismatch (Error 9553)
-        #     hook.fn(poolId) / hook.fn(poolKey) / hook.fn(currency0) all fail:
-        #     PoolId/PoolKey/Currency types can't implicitly convert to address/bytes32.
+        # 2j. Strip single-arg hook calls with typed/literal args — type mismatch (Error 9553)
+        #     hook.fn(poolId/poolKey/currency0/currency1/address(0)) all fail:
+        #     PoolId/PoolKey/Currency can't implicitly convert to address/bytes32.
         source = re.sub(
-            r'\bhook\.(\w+)\s*\(\s*(?:poolId|poolKey|currency0|currency1)\s*\)',
+            r'\bhook\.(\w+)\s*\(\s*(?:poolId|poolKey|currency0|currency1|address\s*\(\s*\w*\s*\))\s*\)',
             r'/* hook.\1(typed_arg) — type mismatch, N/A */ 0',
             source,
         )
@@ -829,12 +833,11 @@ class ScenarioProposer:
             source,
         )
 
-        # 2m. Fix assertEq/assertNotEq with a single stripped placeholder arg — Error 2314/4487
+        # 2m. Fix any assert* call with a single stripped placeholder arg — Error 2314/4487
         #     Must run AFTER 2b (which creates the /* ... NOT CALLABLE, removed */ 0 pattern).
-        #     assertEq(/* ... */ 0; or assertEq(/* ... */ 0) has only one arg.
-        #     assertEq(0, 0) then causes 4487 (ambiguous overload) — use assertTrue(true) instead.
+        #     assert*(/* ... */ 0; or assert*(/* ... */ 0) has only one arg → replace entirely.
         source = re.sub(
-            r'assert(?:Eq|NotEq)\s*\(\s*/\*[^\n]*?\*/\s*0\s*(?:\)|;)',
+            r'assert(?:Eq|NotEq|Gt|Lt|Ge|Le)\s*\(\s*/\*[^\n]*?\*/\s*0\s*(?:\)|;)',
             'assertTrue(true); // assertion stripped',
             source,
         )
@@ -888,13 +891,21 @@ class ScenarioProposer:
             source,
         )
 
-        # 2t. Strip LiquidityAmounts.getLiquidityForAmounts / Constants.SQRT_PRICE — not in scope
+        # 2t. Strip LiquidityAmounts / Constants — not in scope (Error 7576)
         #     These V4 test utilities don't exist in the foundry workspace.
-        #     LLMs should use doAddLiquidity() instead of computing liquidity manually.
+        #     Strip tuple-LHS = LiquidityAmounts.fn(...); first (multi-line safe via DOTALL).
+        #     Then strip any remaining standalone call.
         source = re.sub(
-            r'\bLiquidityAmounts\.\w+\s*\([^)]*\)',
-            '/* LiquidityAmounts N/A — use doAddLiquidity */ 1 ether',
+            r'\([^)]*\)\s*=\s*LiquidityAmounts\.\w+[^;]*;',
+            '/* LiquidityAmounts tuple removed */',
             source,
+            flags=re.DOTALL,
+        )
+        source = re.sub(
+            r'\bLiquidityAmounts\.\w+[^;]*?(?=\s*[,;)])',
+            '/* LiquidityAmounts N/A */ 1 ether',
+            source,
+            flags=re.DOTALL,
         )
         source = re.sub(r'\bConstants\.SQRT_PRICE_\w+\b', '79228162514264337593543950336', source)
 
@@ -1016,9 +1027,12 @@ class ScenarioProposer:
             raw = await self.llm.complete(prompt, timeout=time_limit)
             if not raw:
                 break
-            remaining_count -= sub_count
+            parsed = list(_split_scenarios(raw))
+            # Decrement by how many were actually parsed (min 1 to prevent infinite loop).
+            # Allows retry when the LLM returns fewer scenarios than requested.
+            remaining_count -= max(1, len(parsed))
 
-            for source in _split_scenarios(raw):
+            for source in parsed:
                 # Auto-inject known missing imports before compile gate so the
                 # stored scenario source matches what was actually compiled.
                 source = self._preprocess_source(source)
