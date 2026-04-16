@@ -753,23 +753,19 @@ class ScenarioProposer:
         )
 
         # 2k. Strip try/catch around PNBase internal calls (Error 2536)
-        #     PNBase helpers (doSwap, doAddLiquidity, doRemoveLiquidity, doSwapWithHookData)
-        #     are internal functions — try/catch cannot be used with internal calls.
-        #     Strip the `try` keyword and `returns (...)` wrapper; keep the function call.
+        #     PNBase helpers are internal — try/catch cannot wrap internal calls.
+        #     Replace the entire try { body } catch { body } with just the call + ;
         source = re.sub(
-            r'\btry\s+(do(?:Swap|AddLiquidity|RemoveLiquidity|SwapWithHookData)\b)',
-            r'\1',
-            source,
-        )
-        # Strip dangling `returns (Type varname)` after a function call followed by `{`
-        source = re.sub(r'\)\s+returns\s*\([^)]*\)\s*\{', ') {', source)
-        # Strip catch blocks: } catch { ... } or } catch (Error e) { ... }
-        source = re.sub(
-            r'\}\s*catch(?:\s+\([^)]*\))?\s*\{[^}]*\}',
-            '}',
+            r'\btry\s+(do\w+\s*\([^)]*\))(?:\s+returns\s*\([^)]*\))?\s*\{[^}]*\}(?:\s*catch(?:\s+\w+)?\s*(?:\([^)]*\))?\s*\{[^}]*\})?',
+            r'\1;',
             source,
             flags=re.DOTALL,
         )
+
+        # 2l. poolKey.hooks → address(poolKey.hooks) (Error 9322)
+        #     poolKey.hooks is IHooks type; assertEq with address(hook) fails type lookup.
+        source = re.sub(r'address\(poolKey\.hooks\)', 'poolKey.hooks', source)
+        source = re.sub(r'\bpoolKey\.hooks\b', 'address(poolKey.hooks)', source)
 
         # 2i. Fix missing closing paren in assert calls (Error 2314)
         #     LLMs sometimes write assertGt(expr, 0; instead of assertGt(expr, 0);
@@ -1030,7 +1026,9 @@ class ScenarioProposer:
             f"      swap without depeg state active; use assertGe() or just read the getter without asserting delta\n"
             f"  ✗ hook.getCurrentFee(poolId) — PoolId type ≠ hook getter arg type (9553); call zero-arg getters only\n"
             f"  ✗ try doSwap(...) returns (...) {{ }} catch {{ }} — try/catch only works with external calls (2536)\n"
-            f"  ✗ uint256 - int256(x) — cannot mix signed/unsigned in arithmetic (2271); cast both to same type\n\n"
+            f"  ✗ uint256 - int256(x) — cannot mix signed/unsigned in arithmetic (2271); cast both to same type\n"
+            f"  ✗ assertEq(address(hook), poolKey.hooks) — poolKey.hooks is IHooks not address (9322)\n"
+            f"  ✓ assertEq(address(hook), address(poolKey.hooks)) — CORRECT: wrap in address()\n\n"
             f"═══ YOUR TASK ═══\n\n"
             f"Propose {count} NEW test scenarios from the perspective of: {persona.label}.\n"
             f"Each scenario MUST directly reflect how {persona.id} would interact with this hook.\n"
@@ -1109,7 +1107,9 @@ class ScenarioProposer:
             f"      swap without depeg state active; use assertGe() or just read the getter without asserting delta\n"
             f"  ✗ hook.getCurrentFee(poolId) — PoolId type ≠ hook getter arg type (9553); call zero-arg getters only\n"
             f"  ✗ try doSwap(...) returns (...) {{ }} catch {{ }} — try/catch only works with external calls (2536)\n"
-            f"  ✗ uint256 - int256(x) — cannot mix signed/unsigned in arithmetic (2271); cast both to same type\n\n"
+            f"  ✗ uint256 - int256(x) — cannot mix signed/unsigned in arithmetic (2271); cast both to same type\n"
+            f"  ✗ assertEq(address(hook), poolKey.hooks) — poolKey.hooks is IHooks not address (9322)\n"
+            f"  ✓ assertEq(address(hook), address(poolKey.hooks)) — CORRECT: wrap in address()\n\n"
             f"═══ YOUR TASK ═══\n\n"
             f"Propose {count} NEW test scenarios. Each must:\n"
             f"  - Be a COMPLETE Solidity contract in its own ```solidity fenced block\n"
