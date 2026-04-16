@@ -26,6 +26,7 @@ from typing import Dict, List, Optional
 import httpx
 
 from .llm import LLMClient
+from .persona import PersonaDef
 
 
 # ─── security context sources ──────────────────────────────────────────────────
@@ -193,6 +194,7 @@ class Scenario:
     source: str
     proposer: str  # "seed" | "llm" | "human" (promoted from vault)
     gen_created: int
+    persona_id: str = ""  # which ecosystem persona generated this scenario
     gas_samples: List[int] = field(default_factory=list)
     pass_samples: List[int] = field(default_factory=list)
     fail_samples: List[int] = field(default_factory=list)
@@ -275,6 +277,12 @@ class ScenarioPool:
             s.gas_samples.append(gas)
             s.pass_samples.append(passed)
             s.fail_samples.append(failed)
+
+    def get_by_contract_name(self, contract_name: str) -> Optional["Scenario"]:
+        for s in self._scenarios.values():
+            if s.contract_name == contract_name:
+                return s
+        return None
 
     def prune(self, keep_top_k: int = 64, min_samples: int = 4) -> List[str]:
         """Drop low-informativeness scenarios once they have enough samples. Keeps human scenarios."""
@@ -451,6 +459,137 @@ class ScenarioProposer:
         except Exception as e:
             path.unlink(missing_ok=True)
             return False, f"compile-gate exception: {e}"
+
+    async def propose_for_persona(
+        self,
+        hook_source: str,
+        persona: "PersonaDef",
+        count: int,
+        recent_findings: List[str],
+        skill_md: Optional[str] = None,
+        timeout: float = 120.0,
+    ) -> tuple[List[Scenario], List[str]]:
+        """Propose scenarios from a specific ecosystem persona's perspective.
+
+        Same compile-gate + fix-retry mechanics as propose_batch but the
+        prompt is persona-specific and accepted scenarios are tagged with
+        the persona's id for coverage matrix attribution.
+        """
+        await self._ensure_security_context()
+        accepted: List[Scenario] = []
+        rejections: List[str] = []
+        failed_examples: List[tuple[str, str]] = []
+
+        time_start = asyncio.get_event_loop().time()
+        SUB_BATCH = 2
+        remaining_count = count
+        while remaining_count > 0 and len(accepted) < count:
+            elapsed = asyncio.get_event_loop().time() - time_start
+            budget = timeout - elapsed - 5.0
+            if budget < 15.0:
+                break
+            sub_count = min(SUB_BATCH, remaining_count)
+            time_limit = budget * 0.65
+            prompt = self._build_persona_prompt(
+                hook_source, persona, sub_count, recent_findings, skill_md, failed_examples
+            )
+            raw = await self.llm.complete(prompt, timeout=time_limit)
+            if not raw:
+                break
+            remaining_count -= sub_count
+
+            for source in _split_scenarios(raw):
+                name = _extract_contract_name(source)
+                if not name:
+                    rejections.append("no contract name found")
+                    continue
+                if name in {s.contract_name for s in self.pool.all()}:
+                    rejections.append(f"{name}: duplicate")
+                    continue
+                ok, reason = await self._compile_gate(name, source)
+                if not ok:
+                    elapsed = asyncio.get_event_loop().time() - time_start
+                    fix_budget = timeout - elapsed - 5.0
+                    if fix_budget > 15.0:
+                        fixed = await self._fix_scenario(name, source, reason, hook_source, fix_budget)
+                        if fixed:
+                            ok2, reason2 = await self._compile_gate(name, fixed)
+                            if ok2:
+                                source = fixed
+                                ok = True
+                            else:
+                                reason = reason2
+                    if not ok:
+                        failed_examples.append((source[:400], reason))
+                        rejections.append(f"{name}: {reason}")
+                        continue
+                scenario = Scenario(
+                    scenario_id=f"persona-{persona.id}::{name}",
+                    contract_name=name,
+                    filename=f"{name}.t.sol",
+                    source=source,
+                    proposer="llm",
+                    gen_created=0,
+                    persona_id=persona.id,
+                )
+                self.pool.add(scenario)
+                accepted.append(scenario)
+        return accepted, rejections
+
+    def _build_persona_prompt(
+        self,
+        hook_source: str,
+        persona: "PersonaDef",
+        count: int,
+        recent_findings: List[str],
+        skill_md: Optional[str],
+        failed_examples: Optional[List[tuple]] = None,
+    ) -> str:
+        existing = sorted({s.contract_name for s in self.pool.all()})
+        existing_block = ("Do NOT duplicate these existing scenario contracts:\n  - "
+                          + "\n  - ".join(existing)) if existing else ""
+        findings_block = "\n".join(f"- {f}" for f in recent_findings[-16:]) or "- (no failures yet — this is the seed round)"
+        skill_block = f"<skill>\n{skill_md.strip()}\n</skill>\n\n" if skill_md else ""
+        security_block = (
+            f"═══ V4 SECURITY REFERENCE ═══\n\n{self._security_context}\n\n"
+        ) if self._security_context else ""
+        pnbase_block = (
+            f"═══ PNBASE CONTRACT (your base — read exact function signatures) ═══\n\n"
+            f"```solidity\n{self._pnbase_source}\n```\n\n"
+        ) if self._pnbase_source else ""
+        failed_block = ""
+        if failed_examples:
+            lines = ["═══ PREVIOUSLY FAILED PROPOSALS — DO NOT REPEAT THESE PATTERNS ═══\n"]
+            for snippet, error in failed_examples[-4:]:
+                lines.append(f"Failed source (truncated):\n```solidity\n{snippet}\n```\nError: {error}\n")
+            failed_block = "\n".join(lines) + "\n"
+        angles_block = "\n".join(f"  - {a}" for a in persona.scenario_angles)
+
+        return (
+            f"{V4_PRIMER_HEADER}\n\n"
+            f"{pnbase_block}"
+            f"{V4_PRIMER_RULES}\n\n"
+            f"{security_block}"
+            f"{skill_block}"
+            f"═══ PERSONA: {persona.label} ═══\n\n"
+            f"You are acting as {persona.description}\n\n"
+            f"Suggested angles for this persona:\n{angles_block}\n\n"
+            f"═══ HOOK UNDER TEST (src/Hook.sol) ═══\n\n"
+            f"```solidity\n{hook_source}\n```\n\n"
+            f"═══ RECENT FAILURES FOR THIS PERSONA ═══\n{findings_block}\n\n"
+            f"{failed_block}"
+            f"{existing_block}\n\n"
+            f"═══ YOUR TASK ═══\n\n"
+            f"Propose {count} NEW test scenarios from the perspective of: {persona.label}.\n"
+            f"Each scenario MUST directly reflect how {persona.id} would interact with this hook.\n"
+            f"Each must:\n"
+            f"  - Be a COMPLETE Solidity contract in its own ```solidity fenced block\n"
+            f"  - Start with `Scenario_` and be unique\n"
+            f"  - Inherit PNBase, use ONLY APPROVED imports, no setUp() override\n"
+            f"  - Call only functions defined in PNBase above — no direct pool/position/swap calls\n"
+            f"  - NEVER import anything outside the approved list\n\n"
+            f"Output {count} ```solidity blocks, nothing else."
+        )
 
     def _build_prompt(
         self,

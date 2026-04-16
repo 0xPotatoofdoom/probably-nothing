@@ -1,81 +1,69 @@
 """
-Probably Nothing — Core Evaluation Engine
+Probably Nothing — Ecosystem Persona Swarm Evaluator
 
-Two compounding agent loops run concurrently in this evaluator:
+A hook lifecycle simulation: 9 ecosystem personas each generate and run
+test scenarios against the hook from their real-world perspective.
 
-  1. Variant agents  (HookMutator + LLMMutator)
-       Parametric → structural → LLM-assisted mutations of the hook source.
-  2. Scenario agents (ScenarioProposer)
-       LLM-authored Forge test contracts that probe the hook from new angles.
-       Compile-gated, pooled, variance-ranked.
+The hook is IMMUTABLE — we test it, not rewrite it.
 
-Both feed each other: findings from the harness inform new scenarios AND new
-variants every generation. Runs until the wall-clock budget expires or the
-variant population plateaus with no new informative scenarios arriving.
+Each persona represents a participant the hook will encounter after deployment:
+router aggregators, MEV searchers, LP whales, retail traders, bridge integrators,
+security auditors, DEX listing teams, BD integrators, and high-frequency gas users.
+
+Output is a coverage matrix: "Router: 6/9 pass | Security: 3/7 pass | ..."
+Personas with failures get follow-up scenario rounds so the swarm compounds.
 """
 from __future__ import annotations
 
 import asyncio
 import os
 import time
-from collections import deque
 from typing import AsyncGenerator, Dict, Any, List, Optional
 
 from .fetcher import HookFetcher
-from .mutator import HookMutator, LLMMutator
-from .harness import FoundryHarness, MockHarness, build_harness
-from .scorer import Scorer
+from .harness import build_harness
 from .exporter import VaultExporter
 from .llm import build_llm
 from .scenario import ScenarioPool, ScenarioProposer
 from .knowledge import KnowledgeGraph
 from .reporter import ReACTReporter
+from .persona import PERSONAS, PersonaDef
 
 
 WALL_BUDGET_SECONDS = float(os.getenv("PN_WALL_BUDGET", "600"))
-MAX_CONCURRENT_VARIANTS = int(os.getenv("PN_MAX_CONCURRENCY", "12"))
 SKILL_MD_CAP_BYTES = 20 * 1024
-SEED_RING_SIZE = 32
-
-# Scenario generation controls
-# Kept small: each LLM call asks for BATCH_SIZE scenarios at a time so the
-# model can actually complete all of them within the num_predict budget.
-SEED_SCENARIO_COUNT = int(os.getenv("PN_SEED_SCENARIOS", "8"))
-PER_GEN_SCENARIO_COUNT = int(os.getenv("PN_PER_GEN_SCENARIOS", "4"))
+SCENARIOS_PER_PERSONA = int(os.getenv("PN_SCENARIOS_PER_PERSONA", "2"))
+FOLLOWUP_SCENARIOS = int(os.getenv("PN_FOLLOWUP_SCENARIOS", "2"))
+FOLLOWUP_THRESHOLD = float(os.getenv("PN_FOLLOWUP_THRESHOLD", "0.5"))
+MAX_FOLLOWUP_ROUNDS = int(os.getenv("PN_FOLLOWUP_ROUNDS", "2"))
 MAX_ACTIVE_SCENARIOS = int(os.getenv("PN_MAX_SCENARIOS", "128"))
 
 
 class HookEvaluator:
     def __init__(self):
         self.fetcher = HookFetcher()
-        self.mutator = HookMutator()
-        self.scorer = Scorer()
         self.exporter = VaultExporter()
         self.llm = build_llm()
-        self.llm_mutator = LLMMutator(self.llm)
         self.knowledge = KnowledgeGraph()
         self.reporter = ReACTReporter(self.llm)
 
     async def analyze(
         self,
         github_url: str,
-        num_agents: int = 6,
+        num_agents: int = 6,   # kept for API compat, ignored (persona count is fixed)
         skill_md: Optional[str] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         start = time.monotonic()
         deadline = start + WALL_BUDGET_SECONDS
-        seed_ring: deque[str] = deque(maxlen=SEED_RING_SIZE)
-        semaphore = asyncio.Semaphore(MAX_CONCURRENT_VARIANTS)
 
         if skill_md:
             skill_md = skill_md[:SKILL_MD_CAP_BYTES]
-            yield {"type": "status", "message": f"Loaded skill.md ({len(skill_md)} chars) — using as research seed."}
+            yield {"type": "status", "message": f"Loaded skill.md ({len(skill_md)} chars)."}
 
         try:
-            # Load prior knowledge for this hook before fetching
-            prior_ctx = self.knowledge.get_prior_context(github_url, patterns=[])
-            if prior_ctx:
-                yield {"type": "status", "message": f"Knowledge graph: {self.knowledge.total_runs()} prior runs loaded."}
+            prior_runs = self.knowledge.total_runs()
+            if prior_runs:
+                yield {"type": "status", "message": f"Knowledge graph: {prior_runs} prior runs loaded."}
 
             yield {"type": "status", "message": "Fetching hook source..."}
             hook_source = await self.fetcher.fetch(github_url)
@@ -85,14 +73,13 @@ class HookEvaluator:
             harness = build_harness(workspace)
             yield {"type": "status", "message": f"Harness: {harness.mode}"
                    + (" (real Foundry + V4 stack)" if harness.mode == "foundry"
-                      else " (image 'probably-nothing-foundry' not found — falling back to content-hashed stubs)")}
+                      else " (image not found — using stub harness)")}
 
-            # Scenario pool — seeded from Baseline + any human-promoted scenarios from prior vaults.
+            # Scenario pool — seeded from Baseline + human-promoted scenarios from prior vaults.
             pool = ScenarioPool(workspace) if workspace else None
             proposer: Optional[ScenarioProposer] = None
             if pool is not None:
                 pool.register_existing_baseline()
-                # Milestone D: pick up author:human scenarios compounded from prior runs.
                 human_items = self.exporter.load_human_scenarios(github_url)
                 if human_items:
                     installed = pool.add_human_scenarios(human_items)
@@ -104,243 +91,151 @@ class HookEvaluator:
                     yield {"type": "status", "message": "Loading V4 security reference from uniswap-ai + ethskills..."}
                     await proposer._ensure_security_context()
                     ctx_size = len(proposer._security_context or "")
-                    yield {"type": "status", "message": f"Security context: {ctx_size:,} chars loaded." if ctx_size else "Security context: unavailable (offline?), continuing without."}
-                    # Merge fetched security context into skill_md so mutator + proposer share the same signal
-                    skill_md = "\n\n".join(filter(None, [skill_md, proposer._security_context]))[:SKILL_MD_CAP_BYTES] or None
-                    # Inject prior knowledge into seed proposals
-                    prior_ctx = self.knowledge.get_prior_context(github_url, patterns=[])
-                    seed_skill = "\n\n".join(filter(None, [skill_md, prior_ctx]))
-                    yield {"type": "status", "message": f"Seeding scenario pool — proposing {SEED_SCENARIO_COUNT} scenarios..."}
-                    seed, seed_rejects = await proposer.propose_batch(
-                        hook_source, count=SEED_SCENARIO_COUNT, gen=0,
-                        recent_findings=[], skill_md=seed_skill or None,
-                        timeout=min(180.0, max(5.0, deadline - time.monotonic())),
+                    yield {"type": "status",
+                           "message": f"Security context: {ctx_size:,} chars loaded."
+                           if ctx_size else "Security context: unavailable, continuing without."}
+                    # Merge security context into skill_md so it reaches every persona prompt
+                    if proposer._security_context:
+                        skill_md = "\n\n".join(filter(None, [skill_md, proposer._security_context]))[:SKILL_MD_CAP_BYTES] or None
+
+            # Spawn persona agents (visual)
+            for persona in PERSONAS:
+                await asyncio.sleep(0.2)
+                yield {"type": "agent_spawn", "agent_id": persona.id,
+                       "label": persona.label, "direction": persona.direction}
+
+            # ── Phase 1: Seed — each persona proposes its initial scenarios ────────
+            all_persona_failures: Dict[str, List[str]] = {p.id: [] for p in PERSONAS}
+
+            if proposer is not None and harness.mode == "foundry":
+                for persona in PERSONAS:
+                    if time.monotonic() >= deadline - 60:
+                        break
+                    yield {"type": "status",
+                           "message": f"[{persona.id}] Seeding {SCENARIOS_PER_PERSONA} scenarios..."}
+                    new_s, rejects = await proposer.propose_for_persona(
+                        hook_source, persona,
+                        count=SCENARIOS_PER_PERSONA,
+                        recent_findings=[],
+                        skill_md=skill_md,
+                        timeout=min(180.0, max(15.0, deadline - time.monotonic() - 30)),
                     )
-                    for s in seed:
+                    for s in new_s:
                         yield {"type": "scenario_added", "scenario_id": s.scenario_id,
-                               "contract": s.contract_name, "proposer": s.proposer, "gen": 0}
-                    for r in seed_rejects:
+                               "contract": s.contract_name, "persona_id": persona.id}
+                    for r in rejects:
                         yield {"type": "scenario_rejected", "reason": r}
-                    yield {"type": "status", "message": f"Scenario pool seeded: {len(pool.active())} active ({len(seed_rejects)} rejected)."}
 
-            # Spawn variant agents (visual + role assignment).
-            agent_roles = self._assign_roles(num_agents)
-            for agent in agent_roles:
-                await asyncio.sleep(0.3)
-                yield {"type": "agent_spawn", "agent_id": agent["id"],
-                       "label": agent["label"], "direction": agent["direction"]}
+                total_seeded = len(pool.active()) if pool else 0
+                yield {"type": "status", "message": f"Seeded {total_seeded} scenarios across {len(PERSONAS)} personas."}
 
-            yield {"type": "status", "message": "Starting parametric mutations..."}
-            params = self.mutator.extract_params(hook_source)
-            population = self.mutator.parametric_variants(hook_source, params,
-                                                          count=num_agents, agents=agent_roles)
-
-            generation = 0
+            # ── Phase 2: Run all scenarios against the original hook ──────────────
             all_findings: List[Dict[str, Any]] = []
-            best_score = 0.0
-            best_source = hook_source
-            tier = "parametric"
-            llm_attempts = 0
-            stagnation = 0
-            # Agent memory: rolling list of unique findings per agent archetype
-            agent_memories: Dict[str, List[str]] = {a["id"]: [] for a in agent_roles}
-            scored: List[Dict[str, Any]] = []
+            coverage: Dict[str, Any] = {p.id: {"label": p.label, "passed": 0, "failed": 0,
+                                                 "total": 0, "pass_rate": 0.0, "failures": []}
+                                          for p in PERSONAS}
 
-            while True:
-                if time.monotonic() >= deadline:
-                    yield {"type": "status", "message": "Wall-clock budget exhausted — stopping."}
-                    break
-
-                generation += 1
-                yield {"type": "generation_start", "gen": generation,
-                       "population": len(population), "tier": tier,
-                       "scenarios": len(pool.active()) if pool else 0}
-
-                # Variant work announcements
-                for i, _ in enumerate(population):
-                    a = agent_roles[i % len(agent_roles)]
-                    yield {"type": "variant_start", "agent_id": a["id"], "label": a["label"],
-                           "variant_index": i, "gen": generation, "tier": tier}
-
+            if pool is not None:
                 active_scenarios = [
                     {"contract": s.contract_name, "scenario_id": s.scenario_id}
-                    for s in (pool.active() if pool else [])
+                    for s in pool.active()
                 ]
+                if active_scenarios:
+                    yield {"type": "status",
+                           "message": f"Running {len(active_scenarios)} scenarios against hook..."}
+                    result = await harness.test(
+                        hook_source,
+                        {"id": "persona-runner", "label": "Persona Runner"},
+                        scenarios=active_scenarios,
+                    )
+                    coverage = self._build_coverage_matrix(
+                        result["metrics"].get("per_scenario", {}), pool
+                    )
+                    # Surface findings from coverage failures
+                    for pid, data in coverage.items():
+                        for failure in data["failures"]:
+                            finding = {"agent_id": pid, "text": failure["text"],
+                                       "persona_id": pid, "generation": 1}
+                            all_findings.append(finding)
+                            all_persona_failures[pid].append(failure["text"])
+                            yield {"type": "finding", "agent_id": pid,
+                                   "text": failure["text"], "persona_id": pid}
+                    yield {"type": "coverage_matrix", "coverage": _coverage_summary(coverage)}
 
-                async def _run(source: str, agent: dict, idx: int):
-                    async with semaphore:
-                        r = await harness.test(source, agent, scenarios=active_scenarios)
-                        r["variant_index"] = idx
-                        return r
-
-                tasks = [asyncio.create_task(_run(v, agent_roles[i % len(agent_roles)], i))
-                         for i, v in enumerate(population)]
-
-                scored = []
-                for coro in asyncio.as_completed(tasks):
-                    try:
-                        result = await coro
-                    except Exception:
-                        continue
-                    score = self.scorer.score(result["metrics"])
-                    result["score"] = score
-                    scored.append(result)
-
-                    # Feed per-scenario gas back into the pool so variance rankings update.
-                    if pool is not None:
-                        per = result["metrics"].get("per_scenario", {}) or {}
-                        for key, rec in per.items():
-                            contract = key.split("::")[0] if "::" in key else key
-                            contract = contract.rsplit("/", 1)[-1].replace(".t.sol", "")
-                            sid = self._resolve_sid(pool, contract)
-                            if sid:
-                                pool.record_result(
-                                    sid, int(rec.get("gas", 0)),
-                                    1 if rec.get("status") == "success" else 0,
-                                    1 if rec.get("status") == "failure" else 0,
-                                )
-
-                    yield {
-                        "type": "variant_complete",
-                        "agent_id": result["agent_id"],
-                        "variant_index": result.get("variant_index"),
-                        "gen": generation, "tier": tier,
-                        "score": round(score, 4),
-                        "gas_used": result["metrics"].get("gas_used"),
-                        "tests_passed": result["metrics"].get("tests_passed"),
-                        "tests_failed": result["metrics"].get("tests_failed"),
-                        "mode": result["metrics"].get("mode"),
-                    }
-
-                    aid = result["agent_id"]
-                    for finding in result.get("findings", []):
-                        if finding in seed_ring:
-                            continue  # already surfaced — suppress re-confirmation noise
-                        seed_ring.append(finding)
-                        # Accumulate into agent memory for LLM tier context
-                        mem = agent_memories.setdefault(aid, [])
-                        if finding not in mem:
-                            mem.append(finding)
-                        record = {"agent_id": aid, "text": finding,
-                                  "score": score, "generation": generation}
-                        all_findings.append(record)
-                        yield {"type": "finding", "agent_id": aid,
-                               "text": finding,
-                               "score_delta": round(score - best_score, 4),
-                               "total_findings": len(all_findings)}
-
-                    if time.monotonic() >= deadline:
-                        break
-
-                if not scored:
+            # ── Phase 3: Follow-up rounds for failing personas ────────────────────
+            for round_num in range(1, MAX_FOLLOWUP_ROUNDS + 1):
+                if time.monotonic() >= deadline - 60:
+                    break
+                if proposer is None or harness.mode != "foundry":
                     break
 
-                scored.sort(key=lambda x: x["score"], reverse=True)
-                gen_best = scored[0]["score"]
-                if gen_best > best_score:
-                    best_source = scored[0]["source"]
+                weak = [p for p in PERSONAS
+                        if coverage[p.id]["total"] > 0
+                        and coverage[p.id]["pass_rate"] < FOLLOWUP_THRESHOLD]
+                if not weak:
+                    yield {"type": "status", "message": "All personas above threshold."}
+                    break
 
-                yield {"type": "generation_complete", "gen": generation,
-                       "best_score": round(gen_best, 4),
-                       "variants_tested": len(scored), "tier": tier,
-                       "scenarios": len(pool.active()) if pool else 0}
-
-                improvement = gen_best - best_score
-                best_score = max(best_score, gen_best)
-                # Detect population collapse: all variants scored identically — parametric
-                # mutations produced no differentiation, no point running more gens.
-                score_spread = max(x["score"] for x in scored) - min(x["score"] for x in scored)
-                # Stagnation: increment once per gen if population collapsed OR no improvement
-                if score_spread < 0.001 or improvement < 0.01:
-                    stagnation += 1
-                else:
-                    stagnation = 0
-
-                # Milestone C: propose new scenarios every gen, prune stale ones.
-                # Don't queue more scenario proposals once stagnation >= 2 — we need
-                # Ollama's single-request queue free for the upcoming LLM mutation call.
-                if proposer is not None and harness.mode == "foundry" and stagnation < 2 and time.monotonic() < deadline - 30:
-                    recent_texts = [f["text"] for f in all_findings[-40:]]
-                    yield {"type": "status",
-                           "message": f"Proposing {PER_GEN_SCENARIO_COUNT} scenarios for gen {generation + 1}..."}
-                    new_scenarios, new_rejects = await proposer.propose_batch(
-                        best_source, count=PER_GEN_SCENARIO_COUNT, gen=generation,
-                        recent_findings=recent_texts, skill_md=skill_md,
-                        timeout=min(120.0, max(5.0, deadline - time.monotonic() - 10)),
-                    )
-                    for s in new_scenarios:
-                        yield {"type": "scenario_added", "scenario_id": s.scenario_id,
-                               "contract": s.contract_name, "proposer": s.proposer, "gen": generation}
-                    for r in new_rejects:
-                        yield {"type": "scenario_rejected", "reason": r}
-                    dropped = pool.prune(keep_top_k=MAX_ACTIVE_SCENARIOS)
-                    for sid in dropped:
-                        yield {"type": "scenario_pruned", "scenario_id": sid}
-
-                # Variant plateau handling — escalate to LLM mutator (as before).
-                if stagnation >= 3:
-                    if tier == "parametric" and llm_attempts == 0:
-                        tier = "llm"
-                        llm_attempts += 1
-                        remaining = max(0.0, deadline - time.monotonic())
-                        llm_timeout = min(180.0, remaining)
-                        yield {"type": "status", "message": f"Parametric tier converged. Requesting LLM-assisted mutations (budget={remaining:.0f}s, timeout={llm_timeout:.0f}s)..."}
-                        if llm_timeout < 5.0:
-                            yield {"type": "status", "message": "No budget left for LLM tier — stopping."}
-                            break
-                        # Flatten agent memories into a cross-agent context for the mutator
-                        all_agent_memory = [
-                            f"[{aid}] {finding}"
-                            for aid, memories in agent_memories.items()
-                            for finding in memories[-5:]  # last 5 per agent
-                        ]
-                        variant = await self.llm_mutator.propose(
-                            best_source=best_source,
-                            recent_findings=[f["text"] for f in all_findings],
-                            agent_memory=all_agent_memory,
-                            skill_md=skill_md, timeout=llm_timeout,
-                        )
-                        if not variant:
-                            yield {"type": "status", "message": "LLM declined — stopping."}
-                            break
-                        population = [best_source, variant] + self.mutator.parametric_variants(
-                            variant, self.mutator.extract_params(variant),
-                            count=max(1, num_agents - 2), agents=agent_roles,
-                        )
-                        stagnation = 0
-                        continue
-                    else:
-                        yield {"type": "status", "message": "Converged. Stopping."}
+                yield {"type": "status",
+                       "message": f"Follow-up round {round_num}: {len(weak)} personas below {FOLLOWUP_THRESHOLD:.0%} pass rate."}
+                new_all: List = []
+                for persona in weak:
+                    if time.monotonic() >= deadline - 45:
                         break
+                    recent = all_persona_failures.get(persona.id, [])[-8:]
+                    new_s, rejects = await proposer.propose_for_persona(
+                        hook_source, persona,
+                        count=FOLLOWUP_SCENARIOS,
+                        recent_findings=recent,
+                        skill_md=skill_md,
+                        timeout=min(120.0, max(15.0, deadline - time.monotonic() - 30)),
+                    )
+                    for s in new_s:
+                        yield {"type": "scenario_added", "scenario_id": s.scenario_id,
+                               "contract": s.contract_name, "persona_id": persona.id}
+                        new_all.append(s)
+                    for r in rejects:
+                        yield {"type": "scenario_rejected", "reason": r}
 
-                survivors = scored[: max(1, len(scored) // 5)]
-                population = [s["source"] for s in survivors]
-                population += self.mutator.parametric_variants(
-                    survivors[0]["source"], params,
-                    count=max(0, num_agents - len(survivors)), agents=agent_roles,
-                )
+                if new_all and time.monotonic() < deadline - 30:
+                    followup_active = [{"contract": s.contract_name, "scenario_id": s.scenario_id}
+                                       for s in new_all]
+                    result = await harness.test(
+                        hook_source,
+                        {"id": "persona-runner", "label": "Persona Runner"},
+                        scenarios=followup_active,
+                    )
+                    new_cov = self._build_coverage_matrix(
+                        result["metrics"].get("per_scenario", {}), pool
+                    )
+                    coverage = _merge_coverage(coverage, new_cov)
+                    for pid, data in new_cov.items():
+                        for failure in data["failures"]:
+                            finding = {"agent_id": pid, "text": failure["text"],
+                                       "persona_id": pid, "generation": round_num + 1}
+                            all_findings.append(finding)
+                            all_persona_failures[pid].append(failure["text"])
+                            yield {"type": "finding", "agent_id": pid,
+                                   "text": failure["text"], "persona_id": pid}
+                    yield {"type": "coverage_update",
+                           "coverage": _coverage_summary(coverage), "round": round_num}
 
-            # Generate ReACT security narrative
+            # ── Report + Export ────────────────────────────────────────────────────
             report_md: Optional[str] = None
-            vuln_catalog = proposer._security_context if proposer else None
-            if vuln_catalog and time.monotonic() < deadline - 20:
-                yield {"type": "status", "message": "Synthesising security report..."}
+            if time.monotonic() < deadline - 20:
+                yield {"type": "status", "message": "Synthesising ecosystem coverage report..."}
                 hook_name = github_url.rstrip("/").split("/")[-1]
                 report_md = await self.reporter.generate(
                     hook_name=hook_name,
                     hook_source=hook_source,
-                    best_source=best_source,
-                    findings=all_findings,
-                    scenarios=(pool.all() if pool else []),
-                    vuln_catalog=vuln_catalog,
+                    coverage=coverage,
+                    personas=PERSONAS,
                     timeout=min(120.0, deadline - time.monotonic()),
                 )
                 if report_md:
-                    yield {"type": "status", "message": "Security report synthesised."}
+                    yield {"type": "status", "message": "Coverage report synthesised."}
 
             # Persist cross-run learning
-            finding_texts = [f["text"] for f in all_findings if isinstance(f, dict)]
-            detected_patterns = list(self.mutator.extract_params(hook_source).keys())
             scenario_stats = {
                 s.contract_name: {
                     "runs": len(s.gas_samples),
@@ -350,52 +245,98 @@ class HookEvaluator:
                 }
                 for s in (pool.all() if pool else [])
             }
-            self.knowledge.record_run(github_url, detected_patterns, finding_texts, best_score, scenario_stats)
+            finding_texts = [f["text"] for f in all_findings if isinstance(f, dict)]
+            self.knowledge.record_run(github_url, [], finding_texts, 0.0, scenario_stats)
             self.knowledge.save()
 
             yield {"type": "status", "message": "Generating Obsidian vault..."}
             vault_url = await self.exporter.export(
-                scored, all_findings, github_url,
+                hook_source=hook_source,
+                github_url=github_url,
+                coverage=coverage,
+                personas=PERSONAS,
                 scenarios=(pool.all() if pool else []),
                 report_md=report_md,
             )
 
             elapsed = time.monotonic() - start
+            total_pass = sum(c["passed"] for c in coverage.values())
+            total_tests = sum(c["total"] for c in coverage.values())
             yield {
                 "type": "complete",
                 "total_findings": len(all_findings),
-                "best_score": round(best_score, 4),
-                "generations": generation,
+                "total_scenarios": total_tests,
+                "total_passed": total_pass,
+                "coverage": _coverage_summary(coverage),
                 "elapsed_seconds": round(elapsed, 2),
                 "llm_backend": self.llm.backend,
                 "llm_model": self.llm.model,
                 "harness_mode": harness.mode,
-                "scenarios_active": len(pool.active()) if pool else 0,
                 "vault_url": vault_url,
             }
 
         except Exception as e:
-            yield {"type": "error", "message": str(e)}
+            import traceback
+            yield {"type": "error", "message": str(e), "traceback": traceback.format_exc()}
 
-    @staticmethod
-    def _resolve_sid(pool: ScenarioPool, contract_name: str) -> Optional[str]:
-        for s in pool.all():
-            if s.contract_name == contract_name:
-                return s.scenario_id
-        return None
+    def _build_coverage_matrix(
+        self,
+        per_scenario: Dict[str, Dict],
+        pool: ScenarioPool,
+    ) -> Dict[str, Any]:
+        matrix = {
+            p.id: {"label": p.label, "passed": 0, "failed": 0,
+                   "total": 0, "pass_rate": 0.0, "failures": []}
+            for p in PERSONAS
+        }
+        for key, rec in per_scenario.items():
+            # key looks like "test/scenarios/Scenario_Foo.t.sol::test_Bar"
+            contract = key.split("::")[0].rsplit("/", 1)[-1].replace(".t.sol", "")
+            scenario = pool.get_by_contract_name(contract)
+            if scenario is None:
+                continue
+            pid = scenario.persona_id or "security-auditor"  # seed/baseline → security by default
+            if pid not in matrix:
+                continue
+            matrix[pid]["total"] += 1
+            gas = int(rec.get("gas", 0))
+            if rec.get("status") == "success":
+                matrix[pid]["passed"] += 1
+                pool.record_result(scenario.scenario_id, gas, 1, 0)
+            else:
+                matrix[pid]["failed"] += 1
+                pool.record_result(scenario.scenario_id, gas, 0, 1)
+                matrix[pid]["failures"].append({
+                    "test": key.split("::")[-1] if "::" in key else key,
+                    "gas": gas,
+                    "text": f"{contract}: {key.split('::')[-1] if '::' in key else 'failed'}",
+                })
+        for pid in matrix:
+            t = matrix[pid]["total"]
+            matrix[pid]["pass_rate"] = round(matrix[pid]["passed"] / t, 3) if t else 0.0
+        return matrix
 
-    def _assign_roles(self, num_agents: int):
-        archetypes = [
-            {"id": "gas-optimizer",    "label": "Gas Optimizer",    "direction": "top"},
-            {"id": "mev-sentinel",     "label": "MEV Sentinel",     "direction": "right"},
-            {"id": "lp-deployer",      "label": "LP Deployer",      "direction": "bottom"},
-            {"id": "swap-scenario",    "label": "Swap Scenario",    "direction": "left"},
-            {"id": "edge-case-hunter", "label": "Edge Case Hunter", "direction": "top"},
-            {"id": "security-auditor", "label": "Security Auditor", "direction": "right"},
-        ]
-        agents = []
-        for i in range(num_agents):
-            base = archetypes[i % len(archetypes)].copy()
-            base["id"] = f"{base['id']}-{i+1}" if num_agents > 6 else base["id"]
-            agents.append(base)
-        return agents
+
+def _merge_coverage(base: Dict, new: Dict) -> Dict:
+    """Add new coverage results into base (non-destructive merge)."""
+    merged = {k: dict(v) for k, v in base.items()}
+    for pid, data in new.items():
+        if pid not in merged:
+            merged[pid] = dict(data)
+            continue
+        merged[pid]["passed"] += data["passed"]
+        merged[pid]["failed"] += data["failed"]
+        merged[pid]["total"] += data["total"]
+        merged[pid]["failures"] = merged[pid].get("failures", []) + data.get("failures", [])
+        t = merged[pid]["total"]
+        merged[pid]["pass_rate"] = round(merged[pid]["passed"] / t, 3) if t else 0.0
+    return merged
+
+
+def _coverage_summary(coverage: Dict) -> Dict[str, str]:
+    """Compact summary for streaming events: {persona_id: "6/9 (66.7%)"}."""
+    return {
+        pid: f"{d['passed']}/{d['total']} ({d['pass_rate']:.1%})"
+        for pid, d in coverage.items()
+        if d["total"] > 0
+    }

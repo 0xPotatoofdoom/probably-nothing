@@ -1,93 +1,82 @@
 """
-ReACT-style security report synthesizer.
+ReACT-style ecosystem coverage report synthesizer.
 
-Runs a two-step LLM pass over the completed audit:
-  1. Plan  — given findings + vuln catalog, decide which vulnerability
-             classes are relevant and what evidence exists for each.
-  2. Write — synthesize a structured security narrative with cited evidence.
+Runs a two-step LLM pass over the completed swarm run:
+  1. Plan  — assess which personas surfaced real failures vs. false negatives,
+             and what the failures indicate about the hook's readiness.
+  2. Write — synthesize a structured ecosystem coverage narrative.
 
-Both steps use the local Ollama instance. Falls back gracefully if the LLM
-is unavailable or times out — the vault still exports without the narrative.
+Falls back gracefully if the LLM is unavailable — vault exports without it.
 """
 from __future__ import annotations
 
+import re
 from typing import List, Optional, Dict, Any
 
 from .llm import LLMClient
+from .persona import PersonaDef
 
 
 _PLAN_PROMPT = """\
-You are a senior smart contract security auditor reviewing a Uniswap V4 hook.
-
-Below is the vulnerability reference catalog and the audit findings from an \
-automated research loop. Your task is to PLAN a security report by identifying \
-which vulnerability classes from the catalog are:
-  A) Confirmed present (evidence in findings)
-  B) Not present / mitigated (evidence of absence)
-  C) Unable to determine (insufficient coverage)
+You are a senior Uniswap V4 hook reviewer. A swarm of ecosystem persona agents \
+has just run test scenarios against a hook and produced a coverage matrix. \
+Your task is to PLAN a coverage report by assessing what the results mean for \
+real-world hook deployment readiness.
 
 Respond with a JSON object only, no prose:
 {{
   "hook_summary": "one sentence describing what this hook does",
-  "risk_level": "CRITICAL | HIGH | MEDIUM | LOW | INFORMATIONAL",
-  "confirmed": [{{"class": "...", "evidence": "..."}}],
-  "not_present": [{{"class": "...", "reason": "..."}}],
-  "undetermined": [{{"class": "...", "gap": "..."}}],
-  "key_gas_finding": "...",
-  "key_mev_finding": "..."
+  "overall_readiness": "PRODUCTION_READY | NEEDS_FIXES | PROOF_OF_CONCEPT | UNSAFE",
+  "critical_personas": ["persona_id", ...],
+  "safe_personas": ["persona_id", ...],
+  "top_failures": [{{"persona": "...", "test": "...", "implication": "..."}}],
+  "top_passes": [{{"persona": "...", "implication": "why this matters"}}],
+  "gaps": ["what important scenario types were not covered"],
+  "priority_fixes": ["concise actionable fix #1", "fix #2", "fix #3"]
 }}
-
-=== VULNERABILITY CATALOG ===
-{vuln_catalog}
 
 === HOOK SOURCE ===
 ```solidity
 {hook_source}
 ```
 
-=== AUDIT FINDINGS ({finding_count} total) ===
-{findings_block}
+=== COVERAGE MATRIX ===
+{coverage_block}
 
-=== SCENARIO RESULTS ===
-{scenario_block}
+=== FAILURE DETAILS ===
+{failures_block}
 """
 
 _WRITE_PROMPT = """\
-You are writing the final security report for a Uniswap V4 hook audit.
-Use the structured plan below and write a clear, concise markdown report.
-Cite specific findings as evidence. Be direct — no filler language.
+You are writing the final ecosystem coverage report for a Uniswap V4 hook. \
+This report will be read by the hook's developer to understand how their hook \
+performs across the real-world ecosystem it will operate in. \
+Be direct and actionable — no filler language.
 
-=== AUDIT PLAN ===
+=== COVERAGE PLAN ===
 {plan_json}
 
-=== BEST VARIANT (LLM-proposed improvement) ===
-{best_variant_note}
-
 Write the report in this exact structure:
-# Security Report — {hook_name}
+
+# Ecosystem Coverage Report — {hook_name}
 
 ## Executive Summary
-[2-3 sentences: what the hook does, overall risk level, single most important finding]
+[2-3 sentences: what the hook does, overall readiness, single most critical finding]
 
-## Vulnerability Assessment
+## Coverage Matrix
+[reproduce the table from the plan — which personas pass, which fail, what the pass rate means]
 
-### Confirmed Issues
-[for each confirmed vulnerability: name, severity, evidence, recommendation]
+## Critical Failures
+[for each failing persona: what broke, what a real user would experience, concrete fix]
 
-### Not Present / Mitigated
-[brief list with reason]
+## What's Working
+[for passing personas: what this tells us about the hook's strengths]
 
-### Coverage Gaps
-[what scenarios couldn't be tested and why it matters]
+## Gaps & Blind Spots
+[which real-world scenarios weren't covered, why they matter]
 
-## Gas Analysis
-[key gas finding, comparison to baseline if LLM variant improved it]
-
-## MEV Resistance
-[sandwich survival result, any ordering vulnerabilities]
-
-## Recommendations
-[3-5 concrete, actionable items, prioritised by severity]
+## Priority Fixes
+[3-5 ordered action items from most to least urgent]
 """
 
 
@@ -104,58 +93,54 @@ class ReACTReporter:
         self,
         hook_name: str,
         hook_source: str,
-        best_source: str,
-        findings: List[Dict[str, Any]],
-        scenarios: List[Any],
-        vuln_catalog: str,
+        coverage: Dict[str, Any],
+        personas: List[PersonaDef],
         timeout: float = 120.0,
+        # Legacy params kept for compat — ignored
+        best_source: str = "",
+        findings: Optional[List] = None,
+        scenarios: Optional[List] = None,
+        vuln_catalog: str = "",
     ) -> Optional[str]:
-        if not vuln_catalog:
-            return None
 
-        finding_texts = [
-            f.get("text", str(f)) if isinstance(f, dict) else str(f)
-            for f in findings
-        ]
-        findings_block = "\n".join(f"- {t}" for t in finding_texts[:40]) or "- (no findings)"
+        coverage_lines = []
+        failures_lines = []
+        for persona in personas:
+            data = coverage.get(persona.id, {})
+            total = data.get("total", 0)
+            if total == 0:
+                coverage_lines.append(f"- {persona.label}: no scenarios run")
+                continue
+            passed = data.get("passed", 0)
+            rate = data.get("pass_rate", 0.0)
+            coverage_lines.append(
+                f"- {persona.label}: {passed}/{total} passed ({rate:.1%})"
+            )
+            for failure in data.get("failures", [])[:5]:
+                failures_lines.append(
+                    f"  [{persona.label}] {failure.get('text', failure)}"
+                )
 
-        scenario_block = "\n".join(
-            f"- {s.contract_name}: {len(s.pass_samples)} pass samples, "
-            f"{len(s.fail_samples)} fail samples, "
-            f"failure_rate={s.failure_rate:.1%}"
-            for s in scenarios
-        ) if scenarios else "- (no scenarios run)"
+        coverage_block = "\n".join(coverage_lines) or "- (no scenarios run)"
+        failures_block = "\n".join(failures_lines) or "- (no failures)"
 
         # Step 1: Plan
         plan_prompt = _PLAN_PROMPT.format(
-            vuln_catalog=vuln_catalog[:6000],  # cap catalog to keep prompt size sane
-            hook_source=hook_source[:4000],
-            finding_count=len(findings),
-            findings_block=findings_block,
-            scenario_block=scenario_block,
+            hook_source=hook_source[:3000],
+            coverage_block=coverage_block,
+            failures_block=failures_block,
         )
         plan_raw = await self.llm.complete(plan_prompt, timeout=timeout / 2)
         if not plan_raw:
             return None
 
-        # Extract JSON from plan (model may wrap it in fences)
         plan_json = _extract_json(plan_raw)
         if not plan_json:
             return None
 
         # Step 2: Write
-        source_changed = hook_source.strip() != best_source.strip()
-        best_variant_note = (
-            f"The LLM mutation tier produced an improved variant "
-            f"({len(best_source.splitlines())} lines vs {len(hook_source.splitlines())} original). "
-            f"Differences reflect structural optimisations."
-            if source_changed
-            else "No improvement over original — best variant is the unmodified hook."
-        )
-
         write_prompt = _WRITE_PROMPT.format(
             plan_json=plan_json[:3000],
-            best_variant_note=best_variant_note,
             hook_name=hook_name,
         )
         report = await self.llm.complete(write_prompt, timeout=timeout / 2)
@@ -164,12 +149,9 @@ class ReACTReporter:
 
 def _extract_json(raw: str) -> Optional[str]:
     """Pull JSON from a response that may be wrapped in markdown fences."""
-    import re
-    # Try fenced block first
     m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.DOTALL)
     if m:
         return m.group(1)
-    # Try bare JSON object
     m = re.search(r"\{.*\}", raw, re.DOTALL)
     if m:
         return m.group(0)

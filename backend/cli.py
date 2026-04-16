@@ -98,21 +98,40 @@ def _pretty(event: dict):
         extra = f" · scenarios={scen}" if scen else ""
         return _c("36", f"── gen {event['gen']:02d} done · best={event['best_score']:.4f} · tested={event['variants_tested']}{extra} ──")
     if t == "scenario_added":
-        author = event.get("proposer", "llm")
-        return _c("94", f"+ scenario  {event['contract']:<34} (by {author}, gen {event['gen']})")
+        persona = event.get("persona_id", "")
+        persona_s = f"[{persona}] " if persona else ""
+        return _c("94", f"+ scenario  {persona_s}{event['contract']}")
     if t == "scenario_pruned":
-        return _c("90", f"- scenario  {event['scenario_id']}  (low informativeness)")
+        return _c("90", f"- scenario  {event['scenario_id']}  (pruned)")
     if t == "scenario_rejected":
         reason = event.get("reason", "unknown")
         return _c("90", f"✗ scenario  rejected: {reason[:100]}")
+    if t == "coverage_matrix":
+        cov = event.get("coverage", {})
+        lines = ["", _c("1;36", "── Coverage Matrix ──")]
+        for pid, summary in cov.items():
+            lines.append(f"  {pid:<28} {summary}")
+        return "\n".join(lines)
+    if t == "coverage_update":
+        cov = event.get("coverage", {})
+        r = event.get("round", "?")
+        lines = [_c("36", f"── Follow-up Round {r} ──")]
+        for pid, summary in cov.items():
+            lines.append(f"  {pid:<28} {summary}")
+        return "\n".join(lines)
     if t == "complete":
-        scen = event.get("scenarios_active", 0)
+        cov = event.get("coverage", {})
+        cov_lines = "  " + "\n  ".join(f"{pid:<28} {s}" for pid, s in cov.items()) if cov else ""
+        passed = event.get("total_passed", 0)
+        total = event.get("total_scenarios", 0)
         return _c(
             "1;32",
-            f"\n✓ COMPLETE  findings={event['total_findings']}  best={event['best_score']:.4f}  "
-            f"gens={event['generations']}  elapsed={event['elapsed_seconds']}s  "
-            f"harness={event.get('harness_mode','?')}  scenarios={scen}  "
+            f"\n✓ COMPLETE  passed={passed}/{total}  "
+            f"findings={event.get('total_findings', 0)}  "
+            f"elapsed={event['elapsed_seconds']}s  "
+            f"harness={event.get('harness_mode','?')}  "
             f"llm={event['llm_backend']}:{event['llm_model']}\n"
+            f"{cov_lines}\n"
             f"  vault → {event['vault_url']}"
         )
     if t == "error":
