@@ -661,6 +661,26 @@ class ScenarioProposer:
         #    LLMs sometimes write hook.setDepegState{value: 0}(...) which always fails.
         source = re.sub(r'\{value:\s*[^}]+\}', '', source)
 
+        # 2c. Remove .toString() calls — numeric types have no toString() in Solidity (Error 9582)
+        #     LLMs write JS-style: i.toString() — not valid in Solidity.
+        source = re.sub(r'\.toString\(\)', '', source)
+
+        # 2d. Strip JS-style string concatenation with + (Error 2271)
+        #     Solidity does not support "str" + expr or expr + "str".
+        #     Strategy: strip non-string expr after a string literal, then merge adjacent
+        #     string literals (adjacent "a" "b" IS valid in Solidity — compiler concatenates them).
+        #     Pass 1: "literal" + non-string-expr → "literal"  (stops before next " or , or ) or \n)
+        source = re.sub(r'("(?:[^"\\]|\\.)*")(\s*\+\s*[^,\n)"]+)+', r'\1', source)
+        #     Pass 2: "literal" + "literal" → "literal" "literal"  (adjacent string literals)
+        source = re.sub(r'("(?:[^"\\]|\\.)*")\s*\+\s*(?=")', r'\1 ', source)
+
+        # 2a. Normalize hook.poolManager() → address(hook.poolManager())
+        #     hook.poolManager() returns IPoolManager, NOT address. assertEq(IPoolManager, address)
+        #     fails with 9322 (no matching overload); address() cast fixes all comparison contexts.
+        #     Idempotent: strip any existing address() wrap first, then re-wrap.
+        source = re.sub(r'address\(hook\.poolManager\(\)\)', 'hook.poolManager()', source)
+        source = re.sub(r'\bhook\.poolManager\(\)', 'address(hook.poolManager())', source)
+
         # 2b. Replace hook.fn(non-empty-args) with a comment + 0 placeholder.
         #     All multi-arg hook calls are NOT CALLABLE; replacing them avoids 9553/7576
         #     while keeping zero-arg calls like hook.owner() or hook.totalProtectedVolume().
@@ -874,8 +894,12 @@ class ScenarioProposer:
             f"  ✗ positionManager.positions(...)  — method does not exist (9582)\n"
             f"  ✗ hook.fn{{value: X}}(...)  — non-payable (7006)\n"
             f"  ✗ DepegSeverity.X, Hook.FEE_X  — not in scope (7576)\n"
+            f"  ✗ hook.poolManager() returns IPoolManager NOT address — WRONG: assertEq(hook.poolManager(), address(poolManager)) (9322)\n"
+            f"  ✓ assertEq(address(hook.poolManager()), address(poolManager))  — CORRECT\n"
+            f"  ✗ i.toString(), x.toString()  — Solidity has NO .toString() method (9582)\n"
+            f"  ✗ \"text\" + expr + \"text\"  — Solidity has NO + string concat (2271); use string.concat() or drop the message\n"
             f"  ✓ doSwap(-1 ether, true).amount1()  — CORRECT\n"
-            f"  ✓ hook.owner(), hook.poolManager()  — zero-arg getters, CORRECT\n\n"
+            f"  ✓ hook.owner()  — zero-arg getter, CORRECT\n\n"
             f"═══ YOUR TASK ═══\n\n"
             f"Propose {count} NEW test scenarios from the perspective of: {persona.label}.\n"
             f"Each scenario MUST directly reflect how {persona.id} would interact with this hook.\n"
@@ -937,8 +961,12 @@ class ScenarioProposer:
             f"  ✗ positionManager.positions(...)  — method does not exist (9582)\n"
             f"  ✗ hook.fn{{value: X}}(...)  — non-payable (7006)\n"
             f"  ✗ DepegSeverity.X, Hook.FEE_X  — not in scope (7576)\n"
+            f"  ✗ hook.poolManager() returns IPoolManager NOT address — WRONG: assertEq(hook.poolManager(), address(poolManager)) (9322)\n"
+            f"  ✓ assertEq(address(hook.poolManager()), address(poolManager))  — CORRECT\n"
+            f"  ✗ i.toString(), x.toString()  — Solidity has NO .toString() method (9582)\n"
+            f"  ✗ \"text\" + expr + \"text\"  — Solidity has NO + string concat (2271); use string.concat() or drop the message\n"
             f"  ✓ doSwap(-1 ether, true).amount1()  — CORRECT\n"
-            f"  ✓ hook.owner(), hook.poolManager()  — zero-arg getters, CORRECT\n\n"
+            f"  ✓ hook.owner()  — zero-arg getter, CORRECT\n\n"
             f"═══ YOUR TASK ═══\n\n"
             f"Propose {count} NEW test scenarios. Each must:\n"
             f"  - Be a COMPLETE Solidity contract in its own ```solidity fenced block\n"
