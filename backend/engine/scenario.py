@@ -694,11 +694,26 @@ class ScenarioProposer:
         #     Rule 16 says doSwap() returns BalanceDelta, but LLMs still write int128 assignments.
         #     Adding .amount1() keeps the variable type as int128 so all downstream usage still works.
         #     (Changing the type to BalanceDelta breaks assertLt(delta, 0) etc. — don't do that.)
+        #
+        #     Edge case: after fixing line 1, the LLM sometimes also calls varname.amount1() or
+        #     varname.amount0() on a subsequent line, treating it as BalanceDelta. Since the var
+        #     is now int128, those calls fail with 9582. Collect fixed var names and strip the
+        #     redundant .amount0/.amount1 suffix from any later use of those vars.
+        _fixed_int128_vars: list[str] = []
+        def _fix_int128_doswap(m: re.Match) -> str:
+            # Extract the variable name from the declaration
+            var_m = re.search(r'\bint128\s+(\w+)\s*=', m.group(0))
+            if var_m:
+                _fixed_int128_vars.append(var_m.group(1))
+            return m.group(1) + '.amount1()'
         source = re.sub(
             r'(\bint128\s+\w+\s*=\s*doSwap\s*\([^)\n]*\))(?!\.)',
-            r'\1.amount1()',
+            _fix_int128_doswap,
             source,
         )
+        # Strip .amount0() / .amount1() calls on vars we just fixed to int128
+        for _var in _fixed_int128_vars:
+            source = re.sub(r'\b' + re.escape(_var) + r'\.(amount[01])\(\)', _var, source)
 
         # 2b. Replace hook.fn(non-empty-args) with a comment + 0 placeholder.
         #     All multi-arg hook calls are NOT CALLABLE; replacing them avoids 9553/7576

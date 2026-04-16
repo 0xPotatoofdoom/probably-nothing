@@ -124,20 +124,22 @@ PERSONAS: List[PersonaDef] = [
         label="Security Auditor",
         direction="bottom-left",
         description=(
-            "a smart contract security auditor looking for vulnerabilities. "
-            "You are systematically probing for: missing access control on hook callbacks, "
-            "reentrancy via external calls, BeforeSwapDelta sign errors, "
-            "unsettled deltas causing revert, unauthorized hook invocation, "
-            "and any other V4-specific attack surface from audit checklists."
+            "a smart contract security auditor probing hook invariants and edge cases "
+            "using only the PNBase test helpers (doSwap, doAddLiquidity, doRemoveLiquidity, "
+            "doSwapWithHookData, sandwich, and zero-arg hook getters). "
+            "You test: delta sign correctness, state invariants via getters, "
+            "hook behavior under unusual inputs (minimal amounts, reversed directions, "
+            "custom hookData payloads), and sequencing/ordering effects."
         ),
         scenario_angles=[
-            "Call beforeSwap/afterSwap directly (not via PoolManager) — should revert",
-            "Attempt reentrancy via a malicious token during the hook's external call",
-            "Test BeforeSwapDelta: verify sign convention (hook takes = negative)",
-            "Verify all deltas are settled before unlock() completes",
-            "Attach the hook to an attacker-controlled pool and trigger callbacks",
-            "Test lpFeeOverride boundary: can the hook set fees to 100% and lock the pool?",
-            "Attempt to call updateDepegState (or equivalent) from an unauthorized address",
+            "Delta signs: doSwap(-1 ether, true).amount0() must be negative (spent), .amount1() must be positive (received)",
+            "hookData fuzzing: doSwapWithHookData with empty bytes, abi.encode(uint256(0)), abi.encode(address(this))",
+            "Boundary inputs: doSwap(-1, true) minimal 1-wei swap — must not revert",
+            "Sequencing: 5 swaps alternating direction — hook.totalProtectedVolume() or similar getter should change monotonically",
+            "LP round-trip invariant: doAddLiquidity then doRemoveLiquidity — pool state should not be corrupted",
+            "Sandwich state: run sandwich(-1 ether, true, -0.5 ether), verify hook zero-arg getters return consistent values after",
+            "Idempotency: same doSwap amount twice — second result should be same sign as first",
+            "Large input: doSwap(-100 ether, true) then doSwap(-100 ether, false) — hook should not revert or corrupt state",
         ],
     ),
     PersonaDef(
@@ -185,16 +187,19 @@ PERSONAS: List[PersonaDef] = [
         direction="top-left",
         description=(
             "a high-frequency trader, keeper bot, or scalper executing many transactions per block. "
-            "You care about: gas cost per operation, whether the hook causes gas cost spikes, "
-            "throughput under load, and that repeated rapid interactions don't corrupt state."
+            "You care about: gas cost CONSISTENCY across repeated calls (not absolute values — "
+            "hooks always add overhead), whether the hook causes gas cost SPIKES or GROWTH over time, "
+            "throughput under load, and that repeated rapid interactions don't corrupt state. "
+            "NEVER assert specific gas amounts (50_000, 100_000 etc.) — always compare gas "
+            "between two operations using assertLt(gasA, gasB * 2) style relative checks."
         ),
         scenario_angles=[
-            "Execute 10 small swaps in rapid succession — check gas consistency",
-            "Measure gas cost of beforeSwap for a minimal swap",
-            "Identify any O(n) operations in hook callbacks (unbounded loops)",
-            "Test hook behavior when called from a gas-limit-constrained transaction",
-            "Verify hook gas cost doesn't spike during external state updates (oracle reads)",
-            "Batch multiple LP operations in one block — no interference between them",
+            "Gas consistency: compare gasleft() before/after first vs tenth swap — should be within 2x",
+            "Throughput: 10 doSwap calls in a loop — all should succeed without reverting",
+            "No O(n) growth: run doSwap 5 times, verify last gas cost is not 5x the first",
+            "LP + swap batch: doAddLiquidity → 3× doSwap → doRemoveLiquidity — no interference",
+            "hookData overhead: doSwap vs doSwapWithHookData — compare gas difference",
+            "Direction alternation: swap 0→1 then 1→0 repeatedly — gas should stay stable",
         ],
     ),
 ]
