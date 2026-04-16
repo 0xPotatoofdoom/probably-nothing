@@ -912,6 +912,28 @@ class ScenarioProposer:
         #     PNBase exposes currency0/currency1; deployCurrency() doesn't exist.
         source = source.replace('deployCurrency()', 'currency0')
 
+        # 2x. Strip `memory` from BalanceDelta declarations — BalanceDelta is a value type (Error 6651)
+        #     User-defined value types cannot have data location specifiers.
+        source = re.sub(r'\bBalanceDelta\s+memory\b', 'BalanceDelta', source)
+
+        # 2y. Expand (int128 a, int128 b) = doXxx(...) — doSwap returns BalanceDelta not a tuple (Error 2333)
+        #     Convert tuple destructuring into BalanceDelta assignment + .amount0()/.amount1() accessors.
+        #     Track seen variable names to avoid redeclaration errors.
+        _seen_bd_vars: set[str] = set()
+        _bd_idx = [0]
+        def _expand_doswap_tuple(m: re.Match) -> str:
+            var1, var2, fn_call = m.group(1), m.group(2), m.group(3)
+            tmp = f"_bd{_bd_idx[0]}"; _bd_idx[0] += 1
+            d1 = '' if var1 in _seen_bd_vars else 'int128 '
+            d2 = '' if var2 in _seen_bd_vars else 'int128 '
+            _seen_bd_vars.update([var1, var2])
+            return f'BalanceDelta {tmp} = {fn_call}; {d1}{var1} = {tmp}.amount0(); {d2}{var2} = {tmp}.amount1();'
+        source = re.sub(
+            r'\(\s*int128\s+(\w+)\s*,\s*int128\s+(\w+)\s*\)\s*=\s*(do\w+[^;]*)\s*;',
+            _expand_doswap_tuple,
+            source,
+        )
+
         # 2w. Strip positionManager.call(...) blocks — positionManager not in PNBase scope (Error 9582)
         #     LLMs sometimes call address(positionManager).call(abi.encodeCall(positionManager.fn,...))
         #     Strip the entire assignment statement using a line-depth heuristic.
