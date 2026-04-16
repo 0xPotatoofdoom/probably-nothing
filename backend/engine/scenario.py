@@ -862,6 +862,15 @@ class ScenarioProposer:
         #     Remove commas immediately before a closing brace (with optional comment).
         source = re.sub(r',(\s*(?://[^\n]*)?\s*\n\s*\})', r'\1', source)
 
+        # 2q. Fix `byte(expr)` → `bytes1(uint8(expr))` (Error 6933)
+        #     `byte` type was removed in Solidity 0.8+; replaced by `bytes1`.
+        source = re.sub(r'\bbyte\(([^)]+)\)', r'bytes1(uint8(\1))', source)
+
+        # 2r. Strip all-blank tuple destructuring `(, , ) = expr;` (Error 6933)
+        #     LLMs sometimes discard all return values via (,,) = fn(); which is invalid.
+        #     Strip the entire statement (the call result is discarded anyway).
+        source = re.sub(r'\(\s*,[\s,]*\)\s*=\s*[^;]+;', '/* all-blank tuple removed */', source)
+
         # 3. Auto-inject / normalise known imports.
         #    Problem: LLMs often import from wrong paths (e.g. "lib/uniswap-hooks/..." or relative
         #    paths) causing Error 2904 "Declaration not found". Solution: for each known type,
