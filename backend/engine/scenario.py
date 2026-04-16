@@ -125,13 +125,14 @@ V4_PRIMER_RULES = """\
   8. doSwap amount is always treated as exact-input uint128 — do not pass 0.
   9. Do NOT call poolManager, positionManager, or swapRouter directly — use
      the helper functions defined in PNBase.
- 10. The hook is deployed as `Hook` (renamed). To call hook-specific public
-     functions: `hook.method()` — no import needed. Do NOT import the original
-     contract name (SentinelPegHook, ClankerHook, etc.) — it is NOT on disk.
+ 10. The hook is deployed as `Hook` (renamed from its original name). To call
+     hook-specific public functions write: `hook.method()` — no extra import
+     needed. Do NOT import the original contract name from src/ — that file is
+     now called Hook.sol and is already imported by PNBase.
  11. PREFER testing behavior indirectly via doSwap/doAddLiquidity/sandwich.
      Only call `hook.method()` for functions you can see in the hook source
-     below. If uncertain, skip hook-specific calls — a working indirect test
-     beats a broken direct one.
+     shown below. When uncertain, skip hook-specific calls — a working indirect
+     test beats a broken direct one.
 
 ═══ WORKING EXAMPLE ═══
 
@@ -477,13 +478,18 @@ class ScenarioProposer:
             path.unlink(missing_ok=True)
             err_text = r.stderr or r.stdout or ""
             err_lines = err_text.splitlines()
-            # Collect all meaningful error lines (skip bare "Compiler run failed:" header)
+            # Collect meaningful error lines — skip forge noise, capture actual errors
+            _NOISE = {"Compiler run failed", "nightly build", "Warning: Failed to get git"}
             detail_lines = [
                 ln.strip() for ln in err_lines
-                if ("Error" in ln or "error:" in ln or "Warning" in ln or "-->" in ln)
-                and "Compiler run failed" not in ln
+                if ("Error" in ln or "-->" in ln)
+                and not any(n in ln for n in _NOISE)
             ]
-            summary = "; ".join(detail_lines[:4]) if detail_lines else (err_lines[0].strip() if err_lines else "compile failed")
+            if not detail_lines:
+                # Fall back to first non-blank, non-warning line
+                detail_lines = [ln.strip() for ln in err_lines
+                                 if ln.strip() and not any(n in ln for n in _NOISE)][:2]
+            summary = "; ".join(detail_lines[:4]) if detail_lines else "compile failed"
             return False, summary[:400]
         except Exception as e:
             path.unlink(missing_ok=True)
