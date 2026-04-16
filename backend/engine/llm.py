@@ -2,8 +2,8 @@
 LLM adapter layer.
 
 Env-driven selection:
-  PN_LLM_BACKEND   mock | ollama | openai   (default: mock)
-  PN_LLM_MODEL     model tag                (default: qwen2.5-coder:latest)
+  PN_LLM_BACKEND   ollama | openai          (default: ollama)
+  PN_LLM_MODEL     model tag                (default: qwen3-coder-next:latest)
   PN_LLM_ENDPOINT  base URL                 (default: http://host.docker.internal:11434 for ollama,
                                                        http://localhost:8080/v1 for openai)
   PN_LLM_API_KEY   bearer token             (optional; openai-compat only)
@@ -30,17 +30,6 @@ class LLMClient(Protocol):
 
     async def complete(self, prompt: str, timeout: float = 120.0) -> Optional[str]:
         ...
-
-
-class MockLLM:
-    backend = "mock"
-
-    def __init__(self, model: str = "mock"):
-        self.model = model
-
-    async def complete(self, prompt: str, timeout: float = 120.0) -> Optional[str]:
-        # Returns None so callers treat it as "LLM declined" — keeps flow honest in dev.
-        return None
 
 
 class OllamaLLM:
@@ -87,7 +76,7 @@ class OpenAICompatLLM:
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.4,
-            "max_tokens": 1024,
+            "max_tokens": 8192,
         }
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
@@ -100,13 +89,11 @@ class OpenAICompatLLM:
 
 
 def build_llm() -> LLMClient:
-    backend = os.getenv("PN_LLM_BACKEND", "mock").lower()
+    backend = os.getenv("PN_LLM_BACKEND", "ollama").lower()
     model = os.getenv("PN_LLM_MODEL", DEFAULT_MODEL)
-    if backend == "ollama":
-        endpoint = os.getenv("PN_LLM_ENDPOINT", DEFAULT_OLLAMA_ENDPOINT)
-        return OllamaLLM(model=model, endpoint=endpoint)
     if backend == "openai":
         endpoint = os.getenv("PN_LLM_ENDPOINT", DEFAULT_OPENAI_ENDPOINT)
         api_key = os.getenv("PN_LLM_API_KEY")
         return OpenAICompatLLM(model=model, endpoint=endpoint, api_key=api_key)
-    return MockLLM(model=model)
+    endpoint = os.getenv("PN_LLM_ENDPOINT", DEFAULT_OLLAMA_ENDPOINT)
+    return OllamaLLM(model=model, endpoint=endpoint)
