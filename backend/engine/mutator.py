@@ -140,10 +140,11 @@ class LLMMutator:
         self,
         best_source: str,
         recent_findings: List[str],
+        agent_memory: Optional[List[str]] = None,
         skill_md: Optional[str] = None,
         timeout: float = 60.0,
     ) -> Optional[str]:
-        prompt = self._build_prompt(best_source, recent_findings[-12:], skill_md)
+        prompt = self._build_prompt(best_source, recent_findings[-12:], skill_md, agent_memory)
         raw = await self.llm.complete(prompt, timeout=timeout)
         if not raw:
             return None
@@ -157,14 +158,20 @@ class LLMMutator:
         best_source: str,
         recent_findings: List[str],
         skill_md: Optional[str],
+        agent_memory: Optional[List[str]] = None,
     ) -> str:
         findings_block = "\n".join(f"- {f}" for f in recent_findings) or "- (none yet)"
         skill_block = f"<skill>\n{skill_md.strip()}\n</skill>\n\n" if skill_md else ""
+        memory_block = (
+            "Agent memory (what each archetype has established across all generations):\n" +
+            "\n".join(f"- {m}" for m in agent_memory[:20]) + "\n\n"
+        ) if agent_memory else ""
         return (
             "You are an expert Uniswap V4 hook engineer. Propose ONE structural "
             "variant of the hook below that could score higher on the composite "
             "metric (40% gas, 30% MEV resistance, 20% LP quality, 10% simplicity).\n\n"
             f"{skill_block}"
+            f"{memory_block}"
             f"Recent findings from the autoresearch loop:\n{findings_block}\n\n"
             "Rules:\n"
             "- Output MUST be a single complete Solidity file in one ```solidity fenced block.\n"

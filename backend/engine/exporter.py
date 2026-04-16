@@ -105,7 +105,8 @@ class VaultExporter:
         return picked
 
     async def export(self, results: list, findings: list, github_url: str,
-                     scenarios: Optional[list] = None, run_id: str = None) -> str:
+                     scenarios: Optional[list] = None, run_id: str = None,
+                     report_md: Optional[str] = None) -> str:
         if not run_id:
             import uuid as _uuid
             run_id = datetime.now().strftime("%Y-%m-%d-%H%M%S") + "-" + _uuid.uuid4().hex[:6]
@@ -218,6 +219,13 @@ class VaultExporter:
             "- Liquidity quality (20%): data in agents/lp-deployer.md\n"
             "- Code simplicity (10%): data in sources/hook-source.sol\n"
         )
+
+        if report_md:
+            (synthesis_dir / "security-report.md").write_text(
+                frontmatter("agent", best_score, run_id,
+                    citations=["sources/hook-source.sol", "sources/run-metadata.json"]) +
+                report_md
+            )
 
         (synthesis_dir / "recommendations.md").write_text(
             frontmatter("agent", best_score, run_id,

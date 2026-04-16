@@ -28,6 +28,8 @@ from .scorer import Scorer
 from .exporter import VaultExporter
 from .llm import build_llm
 from .scenario import ScenarioPool, ScenarioProposer
+from .knowledge import KnowledgeGraph
+from .reporter import ReACTReporter
 
 
 WALL_BUDGET_SECONDS = float(os.getenv("PN_WALL_BUDGET", "600"))
@@ -49,6 +51,8 @@ class HookEvaluator:
         self.exporter = VaultExporter()
         self.llm = build_llm()
         self.llm_mutator = LLMMutator(self.llm)
+        self.knowledge = KnowledgeGraph()
+        self.reporter = ReACTReporter(self.llm)
 
     async def analyze(
         self,
@@ -66,6 +70,11 @@ class HookEvaluator:
             yield {"type": "status", "message": f"Loaded skill.md ({len(skill_md)} chars) — using as research seed."}
 
         try:
+            # Load prior knowledge for this hook before fetching
+            prior_ctx = self.knowledge.get_prior_context(github_url, patterns=[])
+            if prior_ctx:
+                yield {"type": "status", "message": f"Knowledge graph: {self.knowledge.total_runs()} prior runs loaded."}
+
             yield {"type": "status", "message": "Fetching hook source..."}
             hook_source = await self.fetcher.fetch(github_url)
             yield {"type": "status", "message": f"Fetched: {self.fetcher.last_filename}"}
@@ -94,10 +103,13 @@ class HookEvaluator:
                     await proposer._ensure_security_context()
                     ctx_size = len(proposer._security_context or "")
                     yield {"type": "status", "message": f"Security context: {ctx_size:,} chars loaded." if ctx_size else "Security context: unavailable (offline?), continuing without."}
+                    # Inject prior knowledge into seed proposals
+                    prior_ctx = self.knowledge.get_prior_context(github_url, patterns=[])
+                    seed_skill = "\n\n".join(filter(None, [skill_md, prior_ctx]))
                     yield {"type": "status", "message": f"Seeding scenario pool — proposing {SEED_SCENARIO_COUNT} scenarios..."}
                     seed, seed_rejects = await proposer.propose_batch(
                         hook_source, count=SEED_SCENARIO_COUNT, gen=0,
-                        recent_findings=[], skill_md=skill_md,
+                        recent_findings=[], skill_md=seed_skill or None,
                         timeout=min(180.0, max(5.0, deadline - time.monotonic())),
                     )
                     for s in seed:
@@ -126,6 +138,8 @@ class HookEvaluator:
             tier = "parametric"
             llm_attempts = 0
             stagnation = 0
+            # Agent memory: rolling list of unique findings per agent archetype
+            agent_memories: Dict[str, List[str]] = {a["id"]: [] for a in agent_roles}
             scored: List[Dict[str, Any]] = []
 
             while True:
@@ -194,14 +208,19 @@ class HookEvaluator:
                         "mode": result["metrics"].get("mode"),
                     }
 
+                    aid = result["agent_id"]
                     for finding in result.get("findings", []):
                         if finding in seed_ring:
                             continue  # already surfaced — suppress re-confirmation noise
                         seed_ring.append(finding)
-                        record = {"agent_id": result["agent_id"], "text": finding,
+                        # Accumulate into agent memory for LLM tier context
+                        mem = agent_memories.setdefault(aid, [])
+                        if finding not in mem:
+                            mem.append(finding)
+                        record = {"agent_id": aid, "text": finding,
                                   "score": score, "generation": generation}
                         all_findings.append(record)
-                        yield {"type": "finding", "agent_id": result["agent_id"],
+                        yield {"type": "finding", "agent_id": aid,
                                "text": finding,
                                "score_delta": round(score - best_score, 4),
                                "total_findings": len(all_findings)}
@@ -261,9 +280,16 @@ class HookEvaluator:
                         if llm_timeout < 5.0:
                             yield {"type": "status", "message": "No budget left for LLM tier — stopping."}
                             break
+                        # Flatten agent memories into a cross-agent context for the mutator
+                        all_agent_memory = [
+                            f"[{aid}] {finding}"
+                            for aid, memories in agent_memories.items()
+                            for finding in memories[-5:]  # last 5 per agent
+                        ]
                         variant = await self.llm_mutator.propose(
                             best_source=best_source,
                             recent_findings=[f["text"] for f in all_findings],
+                            agent_memory=all_agent_memory,
                             skill_md=skill_md, timeout=llm_timeout,
                         )
                         if not variant:
@@ -286,10 +312,44 @@ class HookEvaluator:
                     count=max(0, num_agents - len(survivors)), agents=agent_roles,
                 )
 
+            # Generate ReACT security narrative
+            report_md: Optional[str] = None
+            vuln_catalog = proposer._security_context if proposer else None
+            if vuln_catalog and time.monotonic() < deadline - 20:
+                yield {"type": "status", "message": "Synthesising security report..."}
+                hook_name = github_url.rstrip("/").split("/")[-1]
+                report_md = await self.reporter.generate(
+                    hook_name=hook_name,
+                    hook_source=hook_source,
+                    best_source=best_source,
+                    findings=all_findings,
+                    scenarios=(pool.all() if pool else []),
+                    vuln_catalog=vuln_catalog,
+                    timeout=min(120.0, deadline - time.monotonic()),
+                )
+                if report_md:
+                    yield {"type": "status", "message": "Security report synthesised."}
+
+            # Persist cross-run learning
+            finding_texts = [f["text"] for f in all_findings if isinstance(f, dict)]
+            detected_patterns = list(self.mutator.extract_params(hook_source).keys())
+            scenario_stats = {
+                s.contract_name: {
+                    "runs": len(s.gas_samples),
+                    "pass": sum(s.pass_samples),
+                    "fail": sum(s.fail_samples),
+                    "gas_samples": s.gas_samples[-10:],
+                }
+                for s in (pool.all() if pool else [])
+            }
+            self.knowledge.record_run(github_url, detected_patterns, finding_texts, best_score, scenario_stats)
+            self.knowledge.save()
+
             yield {"type": "status", "message": "Generating Obsidian vault..."}
             vault_url = await self.exporter.export(
                 scored, all_findings, github_url,
                 scenarios=(pool.all() if pool else []),
+                report_md=report_md,
             )
 
             elapsed = time.monotonic() - start
