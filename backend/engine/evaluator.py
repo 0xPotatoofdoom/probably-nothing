@@ -255,7 +255,9 @@ class HookEvaluator:
                     stagnation = 0
 
                 # Milestone C: propose new scenarios every gen, prune stale ones.
-                if proposer is not None and harness.mode == "foundry" and time.monotonic() < deadline - 30:
+                # Don't queue more scenario proposals once stagnation >= 2 — we need
+                # Ollama's single-request queue free for the upcoming LLM mutation call.
+                if proposer is not None and harness.mode == "foundry" and stagnation < 2 and time.monotonic() < deadline - 30:
                     recent_texts = [f["text"] for f in all_findings[-40:]]
                     yield {"type": "status",
                            "message": f"Proposing {PER_GEN_SCENARIO_COUNT} scenarios for gen {generation + 1}..."}
