@@ -715,6 +715,42 @@ class ScenarioProposer:
         for _var in _fixed_int128_vars:
             source = re.sub(r'\b' + re.escape(_var) + r'\.(amount[01])\(\)', _var, source)
 
+        # 2g2. Strip .amount0()/.amount1() from primitive-type-cast expressions (Error 9582)
+        #      Pattern: int256(x).amount1() — x is int128, so int256(x) has no .amount1().
+        #      Safe because legit code writes int256(d.amount1()) (method inside parens), not
+        #      int256(d).amount1() (method after the cast closes). Strip the trailing call.
+        source = re.sub(
+            r'\b(?:int|uint)(?:256|128|64|32)\s*\([^)]+\)\.(amount[01])\(\)',
+            lambda m: m.group(0)[:m.group(0).rfind('.' + m.group(1))],
+            source,
+        )
+
+        # 2g. Auto-fix doSwap(-uint_var, ...) → doSwap(-int128(uint_var), ...) (Error 4907)
+        #     Unary negation on uint128/uint256 is invalid. Collect uint-typed vars and cast.
+        _uint_vars: list[str] = []
+        for _um in re.finditer(r'\buint(?:128|256)\s+(\w+)\s*=', source):
+            _uint_vars.append(re.escape(_um.group(1)))
+        if _uint_vars:
+            _uint_pat = '|'.join(_uint_vars)
+            source = re.sub(
+                r'\bdoSwap\s*\(\s*-(' + _uint_pat + r')\s*,',
+                lambda m: f'doSwap(-int128({m.group(1)}),',
+                source,
+            )
+
+        # 2h. Strip poolManager.getPool(...) — method doesn't exist (Error 9582)
+        #     LLMs write poolManager.getPool(poolKey).fee etc. Replace the whole chain with 0.
+        source = re.sub(r'\bpoolManager\.getPool\s*\([^)]*\)(?:\.\w+)*', '/* getPool N/A */ 0', source)
+
+        # 2i. Fix missing closing paren in assert calls (Error 2314)
+        #     LLMs sometimes write assertGt(expr, 0; instead of assertGt(expr, 0);
+        #     Allow one level of nested parens (e.g. hook.getter()) in the first arg.
+        source = re.sub(
+            r'(assert(?:Gt|Lt|Ge|Le|Eq|Ne)\s*\([^)]*(?:\([^)]*\)[^)]*)*),\s*(\d+|true|false|[a-zA-Z_]\w*)\s*;',
+            r'\1, \2);',
+            source,
+        )
+
         # 2b. Replace hook.fn(non-empty-args) with a comment + 0 placeholder.
         #     All multi-arg hook calls are NOT CALLABLE; replacing them avoids 9553/7576
         #     while keeping zero-arg calls like hook.owner() or hook.totalProtectedVolume().
@@ -957,7 +993,10 @@ class ScenarioProposer:
             f"  ✗ IPoolManager.SwapParams, poolManager.swap(...)  — NOT in scope, NOT callable (7576/9582)\n"
             f"  ✗ PNBase.getAmountsForLiquidity(...)  — does NOT exist (7576)\n"
             f"  ✓ doSwap(-1 ether, true).amount1()  — CORRECT\n"
-            f"  ✓ hook.owner()  — zero-arg getter, CORRECT\n\n"
+            f"  ✓ hook.owner()  — zero-arg getter, CORRECT\n"
+            f"  ✗ doSwap(-uint_var, ...) — uint cannot be negated (4907); cast: doSwap(-int128(uint_var), ...)\n"
+            f"  ✗ poolManager.getPool(...) — does NOT exist (9582); remove entirely\n"
+            f"  ✗ assertGt(expr, 0; — missing closing paren (2314); always write assertGt(expr, 0);\n\n"
             f"═══ YOUR TASK ═══\n\n"
             f"Propose {count} NEW test scenarios from the perspective of: {persona.label}.\n"
             f"Each scenario MUST directly reflect how {persona.id} would interact with this hook.\n"
@@ -1028,7 +1067,10 @@ class ScenarioProposer:
             f"  ✗ IPoolManager.SwapParams, poolManager.swap(...)  — NOT in scope, NOT callable (7576/9582)\n"
             f"  ✗ PNBase.getAmountsForLiquidity(...)  — does NOT exist (7576)\n"
             f"  ✓ doSwap(-1 ether, true).amount1()  — CORRECT\n"
-            f"  ✓ hook.owner()  — zero-arg getter, CORRECT\n\n"
+            f"  ✓ hook.owner()  — zero-arg getter, CORRECT\n"
+            f"  ✗ doSwap(-uint_var, ...) — uint cannot be negated (4907); cast: doSwap(-int128(uint_var), ...)\n"
+            f"  ✗ poolManager.getPool(...) — does NOT exist (9582); remove entirely\n"
+            f"  ✗ assertGt(expr, 0; — missing closing paren (2314); always write assertGt(expr, 0);\n\n"
             f"═══ YOUR TASK ═══\n\n"
             f"Propose {count} NEW test scenarios. Each must:\n"
             f"  - Be a COMPLETE Solidity contract in its own ```solidity fenced block\n"
