@@ -782,6 +782,23 @@ class ScenarioProposer:
             source,
         )
 
+        # 2j3b. Fix `address var = /* stripped */ 0;` → address(0) (Error 9574)
+        #       Stripped hook calls leave int_const 0 which can't assign to address type.
+        source = re.sub(
+            r'(address\s+\w+\s*=\s*/\*[^\n]*?\*/\s*)0\s*;',
+            r'\1address(0);',
+            source,
+        )
+
+        # 2j3. Strip (void)expr; — C-style void cast not valid in Solidity (Error 2314)
+        source = re.sub(r'\(void\)\s*[^;]+;', '', source)
+
+        # 2j4. Strip positions[tokenId].field — direct mapping not in scope (Error 7576)
+        #      PNBase does not expose the positions mapping; use doRemoveLiquidity instead.
+        source = re.sub(r'\bpositions\s*\[[^\]]+\]\.\w+', '/* positions[id].field N/A */ 0', source)
+        #      PNBase does not expose the positions mapping; use doRemoveLiquidity instead.
+        source = re.sub(r'\bpositions\s*\[[^\]]+\]\.\w+', '/* positions[id].field N/A */ 0', source)
+
         # 2j2. Strip positionManager.positions(...) — method doesn't exist (Error 9582)
         #      Including tuple-destructuring form: (a,b,...) = positionManager.positions(id);
         source = re.sub(
