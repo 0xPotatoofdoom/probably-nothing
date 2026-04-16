@@ -742,6 +742,35 @@ class ScenarioProposer:
         #     LLMs write poolManager.getPool(poolKey).fee etc. Replace the whole chain with 0.
         source = re.sub(r'\bpoolManager\.getPool\s*\([^)]*\)(?:\.\w+)*', '/* getPool N/A */ 0', source)
 
+        # 2j. Strip single-arg hook calls that pass poolId/poolKey — type mismatch (Error 9553)
+        #     hook.getCurrentFee(poolId) fails: PoolId can't convert to whatever the hook expects.
+        #     PoolId is type PoolId is bytes32, and most hook getters take address/bytes32 differently.
+        #     Safest fix: replace hook.fn(poolId) and hook.fn(poolKey) with a comment + 0.
+        source = re.sub(
+            r'\bhook\.(\w+)\s*\(\s*(?:poolId|poolKey)\s*\)',
+            r'/* hook.\1(poolId/poolKey) — type mismatch, N/A */ 0',
+            source,
+        )
+
+        # 2k. Strip try/catch around PNBase internal calls (Error 2536)
+        #     PNBase helpers (doSwap, doAddLiquidity, doRemoveLiquidity, doSwapWithHookData)
+        #     are internal functions — try/catch cannot be used with internal calls.
+        #     Strip the `try` keyword and `returns (...)` wrapper; keep the function call.
+        source = re.sub(
+            r'\btry\s+(do(?:Swap|AddLiquidity|RemoveLiquidity|SwapWithHookData)\b)',
+            r'\1',
+            source,
+        )
+        # Strip dangling `returns (Type varname)` after a function call followed by `{`
+        source = re.sub(r'\)\s+returns\s*\([^)]*\)\s*\{', ') {', source)
+        # Strip catch blocks: } catch { ... } or } catch (Error e) { ... }
+        source = re.sub(
+            r'\}\s*catch(?:\s+\([^)]*\))?\s*\{[^}]*\}',
+            '}',
+            source,
+            flags=re.DOTALL,
+        )
+
         # 2i. Fix missing closing paren in assert calls (Error 2314)
         #     LLMs sometimes write assertGt(expr, 0; instead of assertGt(expr, 0);
         #     Allow one level of nested parens (e.g. hook.getter()) in the first arg.
@@ -998,7 +1027,10 @@ class ScenarioProposer:
             f"  ✗ poolManager.getPool(...) — does NOT exist (9582); remove entirely\n"
             f"  ✗ assertGt(expr, 0; — missing closing paren (2314); always write assertGt(expr, 0);\n"
             f"  ✗ assertGt(hook.totalProtectedVolume(), initial) — hook-specific state may NOT change on a simple\n"
-            f"      swap without depeg state active; use assertGe() or just read the getter without asserting delta\n\n"
+            f"      swap without depeg state active; use assertGe() or just read the getter without asserting delta\n"
+            f"  ✗ hook.getCurrentFee(poolId) — PoolId type ≠ hook getter arg type (9553); call zero-arg getters only\n"
+            f"  ✗ try doSwap(...) returns (...) {{ }} catch {{ }} — try/catch only works with external calls (2536)\n"
+            f"  ✗ uint256 - int256(x) — cannot mix signed/unsigned in arithmetic (2271); cast both to same type\n\n"
             f"═══ YOUR TASK ═══\n\n"
             f"Propose {count} NEW test scenarios from the perspective of: {persona.label}.\n"
             f"Each scenario MUST directly reflect how {persona.id} would interact with this hook.\n"
@@ -1074,7 +1106,10 @@ class ScenarioProposer:
             f"  ✗ poolManager.getPool(...) — does NOT exist (9582); remove entirely\n"
             f"  ✗ assertGt(expr, 0; — missing closing paren (2314); always write assertGt(expr, 0);\n"
             f"  ✗ assertGt(hook.totalProtectedVolume(), initial) — hook-specific state may NOT change on a simple\n"
-            f"      swap without depeg state active; use assertGe() or just read the getter without asserting delta\n\n"
+            f"      swap without depeg state active; use assertGe() or just read the getter without asserting delta\n"
+            f"  ✗ hook.getCurrentFee(poolId) — PoolId type ≠ hook getter arg type (9553); call zero-arg getters only\n"
+            f"  ✗ try doSwap(...) returns (...) {{ }} catch {{ }} — try/catch only works with external calls (2536)\n"
+            f"  ✗ uint256 - int256(x) — cannot mix signed/unsigned in arithmetic (2271); cast both to same type\n\n"
             f"═══ YOUR TASK ═══\n\n"
             f"Propose {count} NEW test scenarios. Each must:\n"
             f"  - Be a COMPLETE Solidity contract in its own ```solidity fenced block\n"
