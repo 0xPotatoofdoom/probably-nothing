@@ -144,7 +144,13 @@ V4_PRIMER_RULES = """\
      `tokenId`, `gasUsed` instead.
  13. pragma solidity MUST be exactly `^0.8.26`. Do NOT write `^0.826` or any
      other variation — that will fail to compile.
- 14. doSwap() returns BalanceDelta — NOT int128, NOT uint256, NOT an int256.
+ 14. Hook-internal enum types and constants are NOT in scope in test contracts.
+     They are defined inside the hook, not imported. Do NOT reference them:
+     WRONG: hook.setDepegState(..., uint256(DepegSeverity.SEVERE)); ← DepegSeverity undefined
+     WRONG: assertEq(fee, Hook.FEE_SEVERE);   ← Hook is not a type you can access
+     RIGHT: use numeric values or ignore the constant entirely.
+
+ 15. doSwap() returns BalanceDelta — NOT int128, NOT uint256, NOT an int256.
      WRONG: int128 x = doSwap(-1 ether, true);        ← Error 9574, won't compile
      RIGHT: int128 x = doSwap(-1 ether, true).amount1();  ← inline .amount1()
      RIGHT: BalanceDelta d = doSwap(-1 ether, true);  ← named var (import required)
@@ -254,12 +260,47 @@ def _safe_hook_source(source: str) -> str:
     Functions with parameters are replaced with a one-line stub comment so the
     LLM cannot copy-paste signatures and produce type-mismatch compile errors.
     Zero-argument functions (safe to call from tests) are kept intact.
+
+    Enum definitions are removed entirely: the LLM can see enum names in the
+    code but cannot access them from tests (they are scoped to the hook contract),
+    so showing them causes `DepegSeverity.SEVERE`-style 7576 errors.
+
+    Constant state-variable declarations are also removed for the same reason
+    (e.g. `uint256 public constant FEE_SEVERE = 100` → seeing it causes LLM to
+    write `Hook.FEE_SEVERE` which fails to compile).
     """
     lines = source.splitlines(keepends=True)
     out = []
     i = 0
     while i < len(lines):
         ln = lines[i]
+
+        # Strip enum definitions (replace with a one-liner note)
+        enum_start = re.match(r'(\s*)enum\s+(\w+)\s*\{', ln)
+        if enum_start:
+            indent = enum_start.group(1)
+            enum_name = enum_start.group(2)
+            # Skip the enum body
+            depth = ln.count('{') - ln.count('}')
+            i += 1
+            while i < len(lines) and depth > 0:
+                depth += lines[i].count('{') - lines[i].count('}')
+                i += 1
+            out.append(f"{indent}// [ENUM {enum_name} — NOT accessible from tests, do not reference]\n")
+            continue
+
+        # Strip `constant` state variable declarations
+        # Matches: `type public constant NAME = value;` or `type constant NAME = value;`
+        const_m = re.match(r'(\s*\w[\w\s*]*\bconstant\b.*?;)', ln)
+        if const_m and 'function' not in ln:
+            # Extract just the constant name to show in the stub
+            const_name_m = re.search(r'\bconstant\s+(\w+)\s*=', ln)
+            const_name = const_name_m.group(1) if const_name_m else "CONSTANT"
+            indent = re.match(r'(\s*)', ln).group(1)
+            out.append(f"{indent}// [CONSTANT {const_name} — NOT accessible as Hook.{const_name} from tests]\n")
+            i += 1
+            continue
+
         # Look for start of a function declaration
         fn_start = re.match(r'(\s*)function\s+(\w+)\s*\(', ln)
         if fn_start:
