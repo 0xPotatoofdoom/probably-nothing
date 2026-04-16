@@ -491,6 +491,7 @@ class ScenarioProposer:
                     if fix_budget > 15.0:
                         fixed = await self._fix_scenario(name, source, reason, hook_source, fix_budget)
                         if fixed:
+                            fixed = self._preprocess_source(fixed)
                             ok2, reason2 = await self._compile_gate(name, fixed)
                             if ok2:
                                 source = fixed
@@ -598,7 +599,6 @@ class ScenarioProposer:
         return source
 
     def _compile_gate_sync(self, name: str, source: str) -> tuple[bool, str]:
-        source = self._preprocess_source(source)
         path = self.pool.scenarios_dir / f"{name}.t.sol"
         path.write_text(source)
         try:
@@ -683,6 +683,9 @@ class ScenarioProposer:
             remaining_count -= sub_count
 
             for source in _split_scenarios(raw):
+                # Auto-inject known missing imports before compile gate so the
+                # stored scenario source matches what was actually compiled.
+                source = self._preprocess_source(source)
                 name = _extract_contract_name(source)
                 if not name:
                     rejections.append("no contract name found")
@@ -697,6 +700,7 @@ class ScenarioProposer:
                     if fix_budget > 15.0:
                         fixed = await self._fix_scenario(name, source, reason, hook_source, fix_budget)
                         if fixed:
+                            fixed = self._preprocess_source(fixed)
                             ok2, reason2 = await self._compile_gate(name, fixed)
                             if ok2:
                                 source = fixed
