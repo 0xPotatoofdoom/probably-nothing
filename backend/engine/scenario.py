@@ -236,6 +236,66 @@ Do NOT write them. No exceptions.
 """
 
 
+def _safe_hook_source(source: str) -> str:
+    """Return a version of the hook source safe for LLM consumption.
+
+    Functions with parameters are replaced with a one-line stub comment so the
+    LLM cannot copy-paste signatures and produce type-mismatch compile errors.
+    Zero-argument functions (safe to call from tests) are kept intact.
+    """
+    lines = source.splitlines(keepends=True)
+    out = []
+    i = 0
+    while i < len(lines):
+        ln = lines[i]
+        # Look for start of a function declaration
+        fn_start = re.match(r'(\s*)function\s+(\w+)\s*\(', ln)
+        if fn_start:
+            indent = fn_start.group(1)
+            fn_name = fn_start.group(2)
+            # Accumulate the full signature (until matching ')' of param list)
+            sig_lines = [ln.rstrip('\n')]
+            j = i
+            depth = ln.count('(') - ln.count(')')
+            while depth > 0 and j + 1 < len(lines):
+                j += 1
+                sig_lines.append(lines[j].rstrip('\n'))
+                depth += lines[j].count('(') - lines[j].count(')')
+            full_sig = ' '.join(sig_lines)
+
+            # Extract parameter list content
+            param_m = re.search(r'function\s+\w+\s*\(([^)]*)\)', full_sig)
+            params = param_m.group(1).strip() if param_m else ''
+
+            if params:
+                # Has parameters — replace with a stub and skip the body
+                out.append(f"{indent}// [NOT CALLABLE — arg types unknown] function {fn_name}(...)\n")
+                i = j + 1  # skip to line after closing paren of params
+                # Start with brace depth from sig_lines (handles '{' on same line as signature)
+                brace_depth = sum(sl.count('{') - sl.count('}') for sl in sig_lines)
+                # If opening brace not yet found, scan forward past return type / modifiers
+                if brace_depth == 0:
+                    while i < len(lines):
+                        brace_depth += lines[i].count('{') - lines[i].count('}')
+                        i += 1
+                        if brace_depth > 0:
+                            break  # found function body start
+                        if ';' in lines[i - 1]:
+                            break  # abstract/interface function, no body
+                # Skip the body
+                while i < len(lines) and brace_depth > 0:
+                    brace_depth += lines[i].count('{') - lines[i].count('}')
+                    i += 1
+                continue
+            else:
+                # Zero-arg function — keep it intact
+                out.append(ln)
+        else:
+            out.append(ln)
+        i += 1
+    return "".join(out)
+
+
 @dataclass
 class Scenario:
     scenario_id: str
@@ -672,7 +732,7 @@ class ScenarioProposer:
             f"You are acting as {persona.description}\n\n"
             f"Suggested angles for this persona:\n{angles_block}\n\n"
             f"═══ HOOK UNDER TEST (src/Hook.sol) ═══\n\n"
-            f"```solidity\n{hook_source}\n```\n\n"
+            f"```solidity\n{_safe_hook_source(hook_source)}\n```\n\n"
             f"═══ RECENT FAILURES FOR THIS PERSONA ═══\n{findings_block}\n\n"
             f"{failed_block}"
             f"{existing_block}\n\n"
@@ -724,7 +784,7 @@ class ScenarioProposer:
             f"{security_block}"
             f"{skill_block}"
             f"═══ HOOK UNDER TEST (src/Hook.sol) ═══\n\n"
-            f"```solidity\n{hook_source}\n```\n\n"
+            f"```solidity\n{_safe_hook_source(hook_source)}\n```\n\n"
             f"═══ RECENT FINDINGS ═══\n{findings_block}\n\n"
             f"{failed_block}"
             f"{existing_block}\n\n"
