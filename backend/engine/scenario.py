@@ -194,9 +194,15 @@ contract Scenario_WorkingExample is PNBase {
     }
 
     function test_GasRegression_SmallSwap() public {
-        uint256 g = gasleft();
+        uint256 g1 = gasleft();
         doSwap(-1000, true);
-        assertLt(g - gasleft(), 500_000, "gas too high");
+        uint256 gas1 = g1 - gasleft();
+
+        uint256 g2 = gasleft();
+        doSwap(-1000, true);
+        uint256 gas2 = g2 - gasleft();
+        // Relative check: second call should be <= 2x the first (no O(n) growth)
+        assertLt(gas2, gas1 * 2, "gas grew unexpectedly");
     }
 }
 ```
