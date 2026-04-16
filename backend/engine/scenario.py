@@ -912,6 +912,32 @@ class ScenarioProposer:
         #     PNBase exposes currency0/currency1; deployCurrency() doesn't exist.
         source = source.replace('deployCurrency()', 'currency0')
 
+        # 2w. Strip positionManager.call(...) blocks — positionManager not in PNBase scope (Error 9582)
+        #     LLMs sometimes call address(positionManager).call(abi.encodeCall(positionManager.fn,...))
+        #     Strip the entire assignment statement using a line-depth heuristic.
+        def _strip_position_manager_calls(src: str) -> str:
+            lines = src.split('\n')
+            result: list[str] = []
+            i = 0
+            while i < len(lines):
+                ln = lines[i]
+                if 'positionManager' in ln and ('.call(' in ln or 'abi.encodeCall' in ln):
+                    # Walk forward until the statement ends (paren depth back to 0 at ;)
+                    depth = ln.count('(') - ln.count(')')
+                    while i < len(lines) - 1 and (depth > 0 or not ln.rstrip().endswith(';')):
+                        i += 1
+                        ln = lines[i]
+                        depth += ln.count('(') - ln.count(')')
+                    result.append('bool success = true; // positionManager.call N/A')
+                elif 'positionManager.' in ln:
+                    # Inline reference — replace the member access (Error 9582)
+                    result.append(re.sub(r'\bpositionManager\.\w+', '/* positionManager.fn N/A */ address(0)', ln))
+                else:
+                    result.append(ln)
+                i += 1
+            return '\n'.join(result)
+        source = _strip_position_manager_calls(source)
+
         # 2r. Strip all-blank tuple destructuring `(, , ) = expr;` (Error 6933)
         #     LLMs sometimes discard all return values via (,,) = fn(); which is invalid.
         #     Strip the entire statement (the call result is discarded anyway).
@@ -1171,6 +1197,8 @@ class ScenarioProposer:
             f"  ✗ poolManager.getPool(...)   — method does not exist (9582)\n"
             f"  ✗ poolManager.getSlot0(...).sqrtPrice  — wrong return type (9582)\n"
             f"  ✗ positionManager.positions(...)  — method does not exist (9582)\n"
+            f"  ✗ positionManager.decreaseLiquidity(...)  — NOT CALLABLE, use doRemoveLiquidity (9582)\n"
+            f"  ✗ address(positionManager).call(abi.encodeCall(...))  — low-level PM calls not allowed\n"
             f"  ✗ LiquidityAmounts.getLiquidityForAmounts(...)  — not in scope, use doAddLiquidity\n"
             f"  ✗ Constants.SQRT_PRICE_1_1  — not in scope, use numeric literal\n"
             f"  ✗ hook.fn{{value: X}}(...)  — non-payable (7006)\n"
@@ -1254,6 +1282,8 @@ class ScenarioProposer:
             f"  ✗ poolManager.getPool(...)   — method does not exist (9582)\n"
             f"  ✗ poolManager.getSlot0(...).sqrtPrice  — wrong return type (9582)\n"
             f"  ✗ positionManager.positions(...)  — method does not exist (9582)\n"
+            f"  ✗ positionManager.decreaseLiquidity(...)  — NOT CALLABLE, use doRemoveLiquidity (9582)\n"
+            f"  ✗ address(positionManager).call(abi.encodeCall(...))  — low-level PM calls not allowed\n"
             f"  ✗ LiquidityAmounts.getLiquidityForAmounts(...)  — not in scope, use doAddLiquidity\n"
             f"  ✗ Constants.SQRT_PRICE_1_1  — not in scope, use numeric literal\n"
             f"  ✗ hook.fn{{value: X}}(...)  — non-payable (7006)\n"
