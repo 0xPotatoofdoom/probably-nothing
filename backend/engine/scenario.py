@@ -131,14 +131,25 @@ V4_PRIMER_RULES = """\
      hook-specific public functions write: `hook.method()` — no extra import
      needed. Do NOT import the original contract name from src/ — that file is
      now called Hook.sol and is already imported by PNBase.
- 11. PREFER testing behavior indirectly via doSwap/doAddLiquidity/sandwich.
-     Only call `hook.method()` for functions you can see in the hook source
-     shown below. When uncertain, skip hook-specific calls — a working indirect
-     test beats a broken direct one.
+ 11. NEVER call hook functions that take arguments. You do not know the exact
+     Solidity types (e.g. `Currency` ≠ `address`, raw ints ≠ enums) and any
+     mismatch is a compile error. ONLY call zero-parameter view getters
+     (e.g. `hook.owner()`, `hook.poolManager()`). For everything else, test
+     behavior indirectly via doSwap/doAddLiquidity/sandwich.
  12. Do NOT use Solidity reserved words as variable names: `after`, `before`,
      `var`, `let`, `match`, `in`, `of`, `null`, `switch`, `case`, `default`,
      `static`, `typeof`. Use descriptive names like `amountOut`, `delta`,
      `tokenId`, `gasUsed` instead.
+ 13. pragma solidity MUST be exactly `^0.8.26`. Do NOT write `^0.826` or any
+     other variation — that will fail to compile.
+ 14. To read swap output without importing BalanceDelta, call `.amount0()` or
+     `.amount1()` inline on the return value:
+       int128 out = doSwap(-1 ether, true).amount1();   ✓
+     OR import BalanceDelta explicitly if you need a named variable:
+       import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
+       BalanceDelta d = doSwap(-1 ether, true);  ✓
+     Do NOT declare a BalanceDelta variable without its import — that is a
+     compile error.
 
 ═══ WORKING EXAMPLE ═══
 
@@ -147,13 +158,14 @@ V4_PRIMER_RULES = """\
 pragma solidity ^0.8.26;
 
 import {PNBase} from "../base/PNBase.t.sol";
-import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 
 contract Scenario_WorkingExample is PNBase {
     function test_ExactInput_0For1_outputPositive() public {
-        BalanceDelta delta = doSwap(-1 ether, true);
-        assertLt(int256(delta.amount0()), 0, "spent token0");
-        assertGt(int256(delta.amount1()), 0, "received token1");
+        // Read amounts inline — no BalanceDelta import needed
+        int128 spent = doSwap(-1 ether, true).amount0();
+        int128 received = doSwap(-1 ether, true).amount1();
+        assertLt(int256(spent), 0, "spent token0");
+        assertGt(int256(received), 0, "received token1");
     }
 
     function test_AddRemove_NoNetLoss() public {
@@ -491,6 +503,11 @@ class ScenarioProposer:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=COMPILE_TIMEOUT)
             if r.returncode == 0:
                 return True, ""
+            # Dump failing source for debugging before cleanup.
+            _debug_dir = Path("/tmp/pn-failed-scenarios")
+            _debug_dir.mkdir(exist_ok=True)
+            (_debug_dir / f"{name}.t.sol").write_text(source)
+            (_debug_dir / f"{name}.err").write_text(r.stderr or r.stdout or "")
             # Clean up the rejected file so it doesn't poison subsequent builds.
             path.unlink(missing_ok=True)
             err_text = r.stderr or r.stdout or ""
