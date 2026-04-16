@@ -690,10 +690,15 @@ class ScenarioProposer:
         #     Insert 0 before the ; so the expression is valid.
         source = re.sub(r'(NOT CALLABLE[^*]*\*+/)\s*;', r'\1 0;', source)
 
-        # 2f. Auto-fix int128 var = doSwap(...) → BalanceDelta var = doSwap(...) (Error 9574)
+        # 2f. Auto-fix int128 var = doSwap(...) → int128 var = doSwap(...).amount1() (Error 9574)
         #     Rule 16 says doSwap() returns BalanceDelta, but LLMs still write int128 assignments.
-        #     Changing int128 → BalanceDelta makes the var usable via .amount0()/.amount1().
-        source = re.sub(r'\bint128(\s+\w+\s*=\s*doSwap\s*\()', r'BalanceDelta\1', source)
+        #     Adding .amount1() keeps the variable type as int128 so all downstream usage still works.
+        #     (Changing the type to BalanceDelta breaks assertLt(delta, 0) etc. — don't do that.)
+        source = re.sub(
+            r'(\bint128\s+\w+\s*=\s*doSwap\s*\([^)\n]*\))(?!\.)',
+            r'\1.amount1()',
+            source,
+        )
 
         # 2b. Replace hook.fn(non-empty-args) with a comment + 0 placeholder.
         #     All multi-arg hook calls are NOT CALLABLE; replacing them avoids 9553/7576
@@ -713,7 +718,12 @@ class ScenarioProposer:
             source,
         )
 
-        # 3. Auto-inject missing imports
+        # 3. Auto-inject / normalise known imports.
+        #    Problem: LLMs often import from wrong paths (e.g. "lib/uniswap-hooks/..." or relative
+        #    paths) causing Error 2904 "Declaration not found". Solution: for each known type,
+        #    strip ALL existing imports of that type (regardless of path) then re-inject the
+        #    canonical path. This is idempotent — if the import is already correct it gets removed
+        #    and re-added in the same position (or at the end of the import block).
         _AUTO_IMPORTS = {
             "BalanceDelta": 'import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";',
             "Hooks": 'import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";',
@@ -722,13 +732,26 @@ class ScenarioProposer:
             "Constants": 'import {Constants} from "@uniswap/v4-core/test/utils/Constants.sol";',
         }
         for type_name, import_line in _AUTO_IMPORTS.items():
-            if type_name in source and import_line not in source:
-                if re.search(r'\b' + type_name + r'\b', source):
-                    import_re = re.compile(r'^import\s+.*$', re.MULTILINE)
-                    matches = list(import_re.finditer(source))
-                    if matches:
-                        last_import_end = matches[-1].end()
-                        source = source[:last_import_end] + '\n' + import_line + source[last_import_end:]
+            if not re.search(r'\b' + type_name + r'\b', source):
+                continue  # type not used — skip
+            # Strip any existing import that exposes only this type (handles wrong-path imports).
+            # Matches: import {TypeName} from "..."; or import {TypeName, ...} (combined imports
+            # are left alone to avoid accidentally removing needed sibling types).
+            source = re.sub(
+                r'^import\s+\{' + re.escape(type_name) + r'\}\s*from\s*[^;]+;\n?',
+                '',
+                source,
+                flags=re.MULTILINE,
+            )
+            if import_line not in source:
+                import_re = re.compile(r'^import\s+.*$', re.MULTILINE)
+                matches = list(import_re.finditer(source))
+                if matches:
+                    last_import_end = matches[-1].end()
+                    source = source[:last_import_end] + '\n' + import_line + source[last_import_end:]
+                else:
+                    # No imports at all — prepend before contract declaration
+                    source = import_line + '\n' + source
         return source
 
     def _compile_gate_sync(self, name: str, source: str) -> tuple[bool, str]:
