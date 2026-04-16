@@ -738,9 +738,19 @@ class ScenarioProposer:
                 source,
             )
 
-        # 2h. Strip poolManager.getPool(...) — method doesn't exist (Error 9582)
-        #     LLMs write poolManager.getPool(poolKey).fee etc. Replace the whole chain with 0.
+        # 2h. Strip poolManager.getPool(...) — method doesn't exist (Error 9582/7364)
+        #     LLMs write poolManager.getPool(poolKey).fee etc., or use tuple destructuring.
+        #     First strip tuple LHS assignments (Error 7364: tuple from 0 fails), then remainder.
+        source = re.sub(
+            r'\([^)]*\)\s*=\s*poolManager\.getPool\s*\([^)]*\)(?:\.\w+)*\s*;',
+            '/* poolManager.getPool tuple removed */',
+            source,
+        )
         source = re.sub(r'\bpoolManager\.getPool\s*\([^)]*\)(?:\.\w+)*', '/* getPool N/A */ 0', source)
+
+        # 2h2. assertNe → assertNotEq (Error 7576)
+        #      Foundry uses assertNotEq, not assertNe. LLMs sometimes write assertNe.
+        source = source.replace('assertNe(', 'assertNotEq(')
 
         # 2j. Strip single-arg hook calls that pass poolId/poolKey — type mismatch (Error 9553)
         #     hook.getCurrentFee(poolId) fails: PoolId can't convert to whatever the hook expects.
