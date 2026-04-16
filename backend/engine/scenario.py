@@ -657,7 +657,11 @@ class ScenarioProposer:
                   .replace('\u2026', '...')                        # … ellipsis
                   )
 
-        # 2. Auto-inject missing imports
+        # 2. Strip {value: X} from function calls (Error 7006 — non-payable functions)
+        #    LLMs sometimes write hook.setDepegState{value: 0}(...) which always fails.
+        source = re.sub(r'\{value:\s*[^}]+\}', '', source)
+
+        # 3. Auto-inject missing imports
         _AUTO_IMPORTS = {
             "BalanceDelta": 'import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";',
             "Hooks": 'import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";',
