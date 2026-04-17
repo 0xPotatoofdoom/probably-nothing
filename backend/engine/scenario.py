@@ -377,6 +377,14 @@ def _safe_hook_source(source: str) -> str:
     return "".join(out)
 
 
+def _extract_not_callable_fns(safe_hook_src: str) -> frozenset:
+    """Return the set of function names stubbed as NOT CALLABLE by _safe_hook_source."""
+    return frozenset(re.findall(
+        r'//\s*\[NOT CALLABLE[^\]]*\]\s*function\s+(\w+)',
+        safe_hook_src,
+    ))
+
+
 @dataclass
 class Scenario:
     scenario_id: str
@@ -574,7 +582,7 @@ class ScenarioProposer:
                     if fix_budget > 15.0:
                         fixed = await self._fix_scenario(name, source, reason, hook_source, fix_budget)
                         if fixed:
-                            fixed = self._preprocess_source(fixed)
+                            fixed = self._preprocess_source(fixed, _extract_not_callable_fns(_safe_hook_source(hook_source)))
                             ok2, reason2 = await self._compile_gate(name, fixed)
                             if ok2:
                                 source = fixed
@@ -664,7 +672,7 @@ class ScenarioProposer:
         return await loop.run_in_executor(None, self._compile_gate_sync, name, source)
 
     @staticmethod
-    def _preprocess_source(source: str) -> str:
+    def _preprocess_source(source: str, not_callable_fns: "frozenset[str]" = frozenset()) -> str:
         """Auto-fix common trivial issues before compilation.
 
         1. Replace Unicode curly quotes with straight quotes (Error 8936).
@@ -824,6 +832,14 @@ class ScenarioProposer:
             source,
             flags=re.DOTALL,
         )
+        # Belt-and-suspenders: re-run with greedy .* to catch triple-nested /* /* /* ... */ patterns.
+        # Non-greedy .*? can fail when /* appears inside the comment; greedy ensures we reach */ 0;.
+        source = re.sub(
+            r'(address\s+\w+\s*=\s*/\*.*\*/\s*)0\s*;',
+            r'\1address(0);',
+            source,
+            flags=re.DOTALL,
+        )
         # Broader catch-all: address var = 0; (without comment) also fails (Error 9574)
         source = re.sub(r'\baddress(\s+\w+\s*=\s*)0\s*;', r'address\1address(0);', source)
 
@@ -922,10 +938,31 @@ class ScenarioProposer:
             source,
         )
 
+        # 2o2. Strip hook.fn() 0-arg calls to NOT CALLABLE functions (Error 6160)
+        #      _safe_hook_source stubs multi-arg functions but the LLM may still call
+        #      them with 0 args (wrong arg count). Strip them when caller passes the set.
+        if not_callable_fns:
+            def _strip_hook_zero_arg_not_callable(m: re.Match) -> str:
+                fn = m.group(1)
+                if fn in not_callable_fns:
+                    return f'/* hook.{fn}() — wrong arg count, N/A */ 0'
+                return m.group(0)
+            source = re.sub(r'\bhook\.(\w+)\s*\(\s*\)', _strip_hook_zero_arg_not_callable, source)
+
         # 2p. Fix trailing commas in struct/function calls (Error 2074)
         #     Solidity doesn't allow trailing commas: `{ field: val, }` is invalid.
         #     Remove commas immediately before a closing brace (with optional comment).
         source = re.sub(r',(\s*(?://[^\n]*)?\s*\n\s*\})', r'\1', source)
+
+        # 2p2. Strip .amount0()/.amount1() chained on sandwich() — returns void not BalanceDelta (Error 9582)
+        #      Pattern: `type var = sandwich(...).amount0()` → split into side-effect call + var = 0
+        source = re.sub(
+            r'\b((?:int128|int256|uint256|uint128)\s+\w+\s*=\s*)(sandwich\s*\([^)]*\))\.(amount[01])\(\)',
+            lambda m: m.group(2) + '; ' + m.group(1) + '0',
+            source,
+        )
+        # Also strip standalone sandwich(...).amountN() used as an expression (no assignment)
+        source = re.sub(r'\b(sandwich\s*\([^)]*\))\.(amount[01])\(\)', r'\1', source)
 
         # 2q. Fix `byte(expr)` → `bytes1(uint8(expr))` (Error 6933)
         #     `byte` type was removed in Solidity 0.8+; replaced by `bytes1`.
@@ -1219,7 +1256,8 @@ class ScenarioProposer:
             for source in parsed:
                 # Auto-inject known missing imports before compile gate so the
                 # stored scenario source matches what was actually compiled.
-                source = self._preprocess_source(source)
+                _ncf = _extract_not_callable_fns(_safe_hook_source(hook_source))
+                source = self._preprocess_source(source, _ncf)
                 name = _extract_contract_name(source)
                 if not name:
                     rejections.append("no contract name found")
@@ -1234,7 +1272,7 @@ class ScenarioProposer:
                     if fix_budget > 15.0:
                         fixed = await self._fix_scenario(name, source, reason, hook_source, fix_budget)
                         if fixed:
-                            fixed = self._preprocess_source(fixed)
+                            fixed = self._preprocess_source(fixed, _extract_not_callable_fns(_safe_hook_source(hook_source)))
                             ok2, reason2 = await self._compile_gate(name, fixed)
                             if ok2:
                                 source = fixed
