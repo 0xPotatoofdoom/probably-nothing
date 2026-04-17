@@ -934,6 +934,16 @@ class ScenarioProposer:
             source,
         )
 
+        # 2z. Fix uint256(int128_var) — direct cast not allowed (Error 9640)
+        #     Scan for int128 variable declarations, then wrap uint256(var) → uint256(int256(var)).
+        #     Avoids the two-step cast pattern that LLMs miss.
+        _int128_vars = set(re.findall(r'\bint128\s+(\w+)\s*[=;(,]', source))
+        if _int128_vars:
+            def _fix_uint256_int128(m: re.Match) -> str:
+                var = m.group(1)
+                return f'uint256(int256({var}))' if var in _int128_vars else m.group(0)
+            source = re.sub(r'\buint256\((\w+)\)', _fix_uint256_int128, source)
+
         # 2w. Strip positionManager.call(...) blocks — positionManager not in PNBase scope (Error 9582)
         #     LLMs sometimes call address(positionManager).call(abi.encodeCall(positionManager.fn,...))
         #     Strip the entire assignment statement using a line-depth heuristic.
