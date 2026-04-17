@@ -827,7 +827,7 @@ class ScenarioProposer:
         #     PoolId/PoolKey/Currency can't implicitly convert to address/bytes32.
         source = re.sub(
             r'\bhook\.(\w+)\s*\(\s*(?:poolId|poolKey|currency0|currency1|address\s*\(\s*\w*\s*\))\s*\)',
-            r'/* hook.\1(typed_arg) — type mismatch, N/A */ 0',
+            r'/* hook.\1(typed_arg) -- type mismatch, N/A */ 0',
             source,
         )
 
@@ -921,7 +921,7 @@ class ScenarioProposer:
             # Keep single-arg calls (no comma) — they may be valid view getters
             if ',' not in args:
                 return m.group(0)
-            return f"/* hook.{fn_name}(...) — NOT CALLABLE, removed */ 0"
+            return f"/* hook.{fn_name}(...) -- NOT CALLABLE, removed */ 0"
         source = re.sub(
             r'\bhook\.(\w+)\s*\(([^)\n]*\S[^)\n]*)\)',
             _strip_multi_arg_hook_call,
@@ -951,7 +951,7 @@ class ScenarioProposer:
         #     Literal 0 can't implicitly convert to PoolId/Currency/etc.
         source = re.sub(
             r'\bhook\.(\w+)\s*\(\s*\d+\s*\)',
-            r'/* hook.\1(literal_arg) — type mismatch, N/A */ 0',
+            r'/* hook.\1(literal_arg) -- type mismatch, N/A */ 0',
             source,
         )
 
@@ -962,7 +962,7 @@ class ScenarioProposer:
             def _strip_hook_zero_arg_not_callable(m: re.Match) -> str:
                 fn = m.group(1)
                 if fn in not_callable_fns:
-                    return f'/* hook.{fn}() — wrong arg count, N/A */ 0'
+                    return f'/* hook.{fn}() -- wrong arg count, N/A */ 0'
                 return m.group(0)
             source = re.sub(r'\bhook\.(\w+)\s*\(\s*\)', _strip_hook_zero_arg_not_callable, source)
 
