@@ -916,6 +916,32 @@ class ScenarioProposer:
         #     User-defined value types cannot have data location specifiers.
         source = re.sub(r'\bBalanceDelta\s+memory\b', 'BalanceDelta', source)
 
+        # 2x2. Convert doSwap(amount, dir, hookData) → doSwapWithHookData(amount, dir, hookData) (Error 6160)
+        #      Three-arg doSwap doesn't exist; the 3-arg form is doSwapWithHookData.
+        source = re.sub(
+            r'\bdoSwap\s*\(([^,)]+),\s*([^,)]+),\s*([^)]+)\)',
+            r'doSwapWithHookData(\1, \2, \3)',
+            source,
+        )
+
+        # 2x3. Fix float decimal multipliers `X * 1.5` → `X * 3 / 2` (Error 2271 rational_const)
+        #      Solidity doesn't allow uint256 * decimal_literal; convert to integer arithmetic.
+        def _int_multiply(m: re.Match) -> str:
+            num = m.group(2).lstrip('0') or '0'
+            frac = m.group(3)
+            # Convert e.g. 1.5 → * 3 / 2;  2.5 → * 5 / 2; etc.
+            numer = int(num or '0') * 10 + int(frac)
+            denom = 10
+            from math import gcd
+            g = gcd(numer, denom)
+            n, d = numer // g, denom // g
+            return f'{m.group(1)} * {n} / {d}'
+        source = re.sub(
+            r'(\b\w+)\s*\*\s*(\d+)\.(\d)',
+            _int_multiply,
+            source,
+        )
+
         # 2y. Expand (int128 a, int128 b) = doXxx(...) — doSwap returns BalanceDelta not a tuple (Error 2333)
         #     Convert tuple destructuring into BalanceDelta assignment + .amount0()/.amount1() accessors.
         #     Track seen variable names to avoid redeclaration errors.

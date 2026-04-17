@@ -30,15 +30,18 @@ PERSONAS: List[PersonaDef] = [
             "a DEX aggregator or router (1inch, Paraswap, CoW Protocol, Uniswap Universal Router). "
             "You need to route swaps efficiently through this pool. You care about: "
             "correct price quotes, predictable gas costs, no silent reverts, "
-            "and that the hook doesn't break routing assumptions like fee-on-transfer or callback ordering."
+            "and that the hook doesn't break routing assumptions. "
+            "IMPORTANT: use ONLY doSwap/doSwapWithHookData/doAddLiquidity/doRemoveLiquidity. "
+            "Do NOT test fee-on-transfer, multi-hop routing, or exactOutput — those require external "
+            "infrastructure not in PNBase. Test only what doSwap directly returns."
         ),
         scenario_angles=[
-            "Query amountOut for a standard swap through this pool",
-            "Route a multi-hop swap where this hook is one leg",
-            "Verify the hook doesn't silently consume extra tokens during routing",
-            "Test that slippage protection still works when the hook modifies swap amounts",
-            "Check that exactOutput swaps work correctly (not just exactInput)",
-            "Verify the hook handles zeroForOne and oneForZero symmetrically",
+            "zeroForOne swap: doSwap(-1 ether, true).amount0() < 0 and .amount1() > 0 — verify signs",
+            "oneForZero swap: doSwap(-1 ether, false).amount0() > 0 and .amount1() < 0 — verify signs",
+            "Symmetry: doSwap(-1 ether, true) and doSwap(-1 ether, false) both return non-zero BalanceDelta",
+            "No silent revert: doSwap(-0.001 ether, true) succeeds without revert",
+            "Large swap: doSwap(-100 ether, true) succeeds — hook doesn't block large router flows",
+            "Back-to-back: doSwap(-1 ether, true) then doSwap(-1 ether, false) — both succeed",
         ],
     ),
     PersonaDef(
