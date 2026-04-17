@@ -1184,6 +1184,23 @@ class ScenarioProposer:
                 else:
                     # No imports at all — prepend before contract declaration
                     source = import_line + '\n' + source
+
+        # Final pass: fix address var = /* ... */ 0; patterns created by later rules (Error 9574)
+        # Rules 2b/2o/2o2 run after 2j3b and produce new /* ... */ 0 patterns in address context.
+        # Re-run 2j3b here to catch those.
+        source = re.sub(
+            r'(address\s+\w+\s*=\s*/\*.*?\*/\s*)0\s*;',
+            r'\1address(0);',
+            source,
+            flags=re.DOTALL,
+        )
+        source = re.sub(
+            r'(address\s+\w+\s*=\s*/\*.*\*/\s*)0\s*;',
+            r'\1address(0);',
+            source,
+            flags=re.DOTALL,
+        )
+        source = re.sub(r'\baddress(\s+\w+\s*=\s*)0\s*;', r'address\1address(0);', source)
         return source
 
     def _compile_gate_sync(self, name: str, source: str) -> tuple[bool, str]:
