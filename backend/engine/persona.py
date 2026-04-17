@@ -175,7 +175,7 @@ PERSONAS: List[PersonaDef] = [
     PersonaDef(
         id="protocol-bd",
         label="Protocol BD / Integrator",
-        direction="left",
+        direction="left-bottom",
         description=(
             "a protocol integration team building on top of this hook "
             "(e.g., a yield aggregator, a structured product, a points system). "
