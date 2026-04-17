@@ -985,10 +985,12 @@ class ScenarioProposer:
         #     `byte` type was removed in Solidity 0.8+; replaced by `bytes1`.
         source = re.sub(r'\bbyte\(([^)]+)\)', r'bytes1(uint8(\1))', source)
 
-        # 2q2. Replace undeclared lowerTick/upperTick variables with safe defaults (Error 7576)
-        #      LLMs sometimes use these without declaring them; substitute standard tick values.
+        # 2q2. Replace undeclared tick variables with safe defaults (Error 7576)
+        #      LLMs use lowerTick/upperTick or tickLower/tickUpper without declaring them.
         source = re.sub(r'\blowerTick\b', '-60', source)
         source = re.sub(r'\bupperTick\b', '60', source)
+        source = re.sub(r'\btickLower\b', '-60', source)
+        source = re.sub(r'\btickUpper\b', '60', source)
 
         # 2q2c. Fix int24(uint_var OP literal) — can't cast uint256 to int24 directly (Error 9640)
         #       LLMs compute dynamic ticks as int24(i * 120) where i is uint256 loop var.
