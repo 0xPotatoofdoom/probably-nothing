@@ -990,6 +990,27 @@ class ScenarioProposer:
         source = re.sub(r'\blowerTick\b', '-60', source)
         source = re.sub(r'\bupperTick\b', '60', source)
 
+        # 2q2b. Fix int_const * uint128(expr) in tick arithmetic — type mismatch (Error 2271)
+        #       LLMs compute tick ranges as `-60 * uint128(i+1)` — int_const * uint128 is invalid.
+        #       Convert uint128(expr) to int24(int256(expr)) so the multiplication works.
+        source = re.sub(
+            r'(-?\d+)\s*\*\s*uint(?:128|256)\s*\(([^)]+)\)',
+            r'\1 * int24(int256(\2))',
+            source,
+        )
+        # Also strip uint256/uint128 wrapping from doAddLiquidity tick args (first two) (Error 9640)
+        # Ticks are int24; uint256(negative_tick) fails. Strip the outer uint cast from both args.
+        def _fix_addliq_tick_uints(m: re.Match) -> str:
+            a, b, c = m.group(1).strip(), m.group(2).strip(), m.group(3).strip()
+            a = re.sub(r'^uint(?:256|128)\((.+)\)$', r'\1', a)
+            b = re.sub(r'^uint(?:256|128)\((.+)\)$', r'\1', b)
+            return f'doAddLiquidity({a}, {b}, {c})'
+        source = re.sub(
+            r'\bdoAddLiquidity\s*\(([^,]+),([^,]+),([^)]+)\)',
+            _fix_addliq_tick_uints,
+            source,
+        )
+
         # 2q3. Cast doAddLiquidity's 3rd arg to uint128 (Error 9553)
         #      The liquidity parameter is uint128; uint256 expressions can't pass directly.
         #      Also wraps `100 ether` style literals — they are uint256 in Solidity even though
