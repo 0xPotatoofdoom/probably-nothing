@@ -30,7 +30,7 @@ from .reporter import ReACTReporter
 from .persona import PERSONAS, PersonaDef
 
 
-WALL_BUDGET_SECONDS = float(os.getenv("PN_WALL_BUDGET", "900"))
+WALL_BUDGET_SECONDS = float(os.getenv("PN_WALL_BUDGET", "1200"))
 SKILL_MD_CAP_BYTES = 20 * 1024
 SCENARIOS_PER_PERSONA = int(os.getenv("PN_SCENARIOS_PER_PERSONA", "2"))
 FOLLOWUP_SCENARIOS = int(os.getenv("PN_FOLLOWUP_SCENARIOS", "2"))
@@ -109,18 +109,22 @@ class HookEvaluator:
 
             if proposer is not None and harness.mode == "foundry":
                 seed_timeout = min(240.0, max(30.0, deadline - time.monotonic() - 60))
+                # Limit concurrency to avoid overwhelming a local LLM (Ollama serializes internally).
+                # 3 concurrent gives parallelism vs sequential without queue-starvation timeouts.
+                _seed_sem = asyncio.Semaphore(int(os.getenv("PN_SEED_CONCURRENCY", "3")))
                 for persona in PERSONAS:
                     yield {"type": "status",
                            "message": f"[{persona.id}] Seeding {SCENARIOS_PER_PERSONA} scenarios..."}
 
                 async def _seed_one(p: "PersonaDef") -> "tuple[PersonaDef, list, list]":
-                    ns, rj = await proposer.propose_for_persona(
-                        hook_source, p,
-                        count=SCENARIOS_PER_PERSONA,
-                        recent_findings=[],
-                        skill_md=skill_md,
-                        timeout=seed_timeout,
-                    )
+                    async with _seed_sem:
+                        ns, rj = await proposer.propose_for_persona(
+                            hook_source, p,
+                            count=SCENARIOS_PER_PERSONA,
+                            recent_findings=[],
+                            skill_md=skill_md,
+                            timeout=seed_timeout,
+                        )
                     return p, ns, rj
 
                 seed_results = await asyncio.gather(
