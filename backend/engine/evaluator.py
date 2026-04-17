@@ -30,7 +30,7 @@ from .reporter import ReACTReporter
 from .persona import PERSONAS, PersonaDef
 
 
-WALL_BUDGET_SECONDS = float(os.getenv("PN_WALL_BUDGET", "600"))
+WALL_BUDGET_SECONDS = float(os.getenv("PN_WALL_BUDGET", "900"))
 SKILL_MD_CAP_BYTES = 20 * 1024
 SCENARIOS_PER_PERSONA = int(os.getenv("PN_SCENARIOS_PER_PERSONA", "2"))
 FOLLOWUP_SCENARIOS = int(os.getenv("PN_FOLLOWUP_SCENARIOS", "2"))
@@ -108,18 +108,30 @@ class HookEvaluator:
             all_persona_failures: Dict[str, List[str]] = {p.id: [] for p in PERSONAS}
 
             if proposer is not None and harness.mode == "foundry":
+                seed_timeout = min(240.0, max(30.0, deadline - time.monotonic() - 60))
                 for persona in PERSONAS:
-                    if time.monotonic() >= deadline - 60:
-                        break
                     yield {"type": "status",
                            "message": f"[{persona.id}] Seeding {SCENARIOS_PER_PERSONA} scenarios..."}
-                    new_s, rejects = await proposer.propose_for_persona(
-                        hook_source, persona,
+
+                async def _seed_one(p: "PersonaDef") -> "tuple[PersonaDef, list, list]":
+                    ns, rj = await proposer.propose_for_persona(
+                        hook_source, p,
                         count=SCENARIOS_PER_PERSONA,
                         recent_findings=[],
                         skill_md=skill_md,
-                        timeout=min(180.0, max(15.0, deadline - time.monotonic() - 30)),
+                        timeout=seed_timeout,
                     )
+                    return p, ns, rj
+
+                seed_results = await asyncio.gather(
+                    *[_seed_one(p) for p in PERSONAS],
+                    return_exceptions=True,
+                )
+                for item in seed_results:
+                    if isinstance(item, BaseException):
+                        yield {"type": "status", "message": f"  seed error: {item}"}
+                        continue
+                    persona, new_s, rejects = item
                     for s in new_s:
                         yield {"type": "scenario_added", "scenario_id": s.scenario_id,
                                "contract": s.contract_name, "persona_id": persona.id}

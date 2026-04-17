@@ -867,6 +867,8 @@ class ScenarioProposer:
         )
         # Also fix currency0.unwrap() — wrong call pattern; static form is Currency.unwrap(x) (Error 9582)
         source = re.sub(r'\b(currency[01])\.unwrap\(\)', r'Currency.unwrap(\1)', source)
+        # Strip Currency.unwrap(int256(...)) / Currency.unwrap(int24(...)) — tick passed to Currency unwrap
+        source = re.sub(r'\bCurrency\.unwrap\s*\(\s*int(?:256|24|128)\s*\(([^)]+)\)\s*\)', r'\1', source)
 
         # 2j3. Strip (void)expr; — C-style void cast not valid in Solidity (Error 2314)
         source = re.sub(r'\(void\)\s*[^;]+;', '', source)
@@ -878,13 +880,27 @@ class ScenarioProposer:
         source = re.sub(r'\bpositions\s*\[[^\]]+\]\.\w+', '/* positions[id].field N/A */ 0', source)
 
         # 2j2. Strip positionManager.positions(...) — method doesn't exist (Error 9582)
-        #      Including tuple-destructuring form: (a,b,...) = positionManager.positions(id);
+        #      Tuple form: (type1 var1, type2 var2, ...) = positionManager.positions(id);
+        #      Emit zero-initialized declarations so downstream references don't become undeclared.
+        def _strip_positions_tuple(m: re.Match) -> str:
+            lhs = m.group(1)
+            decls = []
+            for part in [p.strip() for p in lhs.split(',')]:
+                tokens = part.split()
+                if len(tokens) >= 2:
+                    typ, name = tokens[0], tokens[-1]
+                    val = 'address(0)' if typ == 'address' else '0'
+                    decls.append(f'{typ} {name} = {val}; /* positionManager.positions N/A */')
+            return '\n'.join(decls) if decls else '/* positionManager.positions tuple removed */'
         source = re.sub(
-            r'\([^)]*\)\s*=\s*positionManager\.positions\s*\([^)]*\)\s*;',
-            '/* positionManager.positions tuple removed */',
+            r'\(([^)]+)\)\s*=\s*positionManager\.positions\s*\([^)]*\)\s*;',
+            _strip_positions_tuple,
             source,
         )
         source = re.sub(r'\bpositionManager\.positions\s*\([^)]*\)', '/* positions N/A */ 0', source)
+        # Strip hallucinated position-liquidity getters (remainingLiquidity, currentLiquidity etc.)
+        source = re.sub(r'\bremainingLiquidity\s*\(\s*\)', '0 /* remainingLiquidity N/A */', source)
+        source = re.sub(r'\bcurrentLiquidity\b(?!\s*=)', '0 /* currentLiquidity N/A */', source)
 
         # 2k. Strip try/catch around PNBase internal calls (Error 2536)
         #     PNBase helpers are internal — try/catch cannot wrap internal calls.
@@ -1138,6 +1154,9 @@ class ScenarioProposer:
                 i += 1
             return '\n'.join(result)
         source = _strip_position_manager_calls(source)
+
+        # 2q4. Strip Python-style `_ = expr;` discard (not valid Solidity — Error 7576)
+        source = re.sub(r'^\s*_\s*=\s*[^;]+;\s*$', '/* discard */', source, flags=re.MULTILINE)
 
         # 2r. Strip all-blank tuple destructuring `(, , ) = expr;` (Error 6933)
         #     LLMs sometimes discard all return values via (,,) = fn(); which is invalid.
