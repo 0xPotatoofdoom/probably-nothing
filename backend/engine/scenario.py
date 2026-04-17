@@ -793,6 +793,19 @@ class ScenarioProposer:
                 source,
             )
 
+        # 2g3. Fix doSwap(-uint128(expr), ...) — uint can't be negated; use int128 (Error 4907)
+        #      Pattern: doSwap(-uint128(expr), ...) → doSwap(-int128(int256(expr)), ...)
+        source = re.sub(
+            r'\b(do\w+\s*\(\s*)-\s*uint(?:128|256)\s*\(([^)]+)\)',
+            r'\1-int128(int256(\2))',
+            source,
+        )
+
+        # 2g4. Rename `after` variable — reserved keyword in Solidity (Error 2314)
+        #      `after` was reserved for future use; LLMs use it as a gas snapshot variable.
+        source = re.sub(r'\b(uint(?:256|128)\s+)after\b', r'\1gasAfter', source)
+        source = re.sub(r'\bafter\b(?=\s*[<>=;)&|,\n])', 'gasAfter', source)
+
         # 2h. Strip poolManager.getPool(...) — method doesn't exist (Error 9582/7364)
         #     LLMs write poolManager.getPool(poolKey).fee etc., or use tuple destructuring.
         #     First strip tuple LHS assignments (Error 7364: tuple from 0 fails), then remainder.
@@ -973,16 +986,19 @@ class ScenarioProposer:
         source = re.sub(r'\blowerTick\b', '-60', source)
         source = re.sub(r'\bupperTick\b', '60', source)
 
-        # 2q3. Cast doAddLiquidity's 3rd arg to uint128 when it's a plain identifier (Error 9553)
-        #      The liquidity parameter is uint128; uint256 variables can't pass directly.
+        # 2q3. Cast doAddLiquidity's 3rd arg to uint128 (Error 9553)
+        #      The liquidity parameter is uint128; uint256 expressions can't pass directly.
+        #      Also wraps `100 ether` style literals — they are uint256 in Solidity even though
+        #      the value fits in uint128 (no implicit uint256→uint128 conversion).
         def _cast_addliq_arg(m: re.Match) -> str:
             a, b, c = m.group(1), m.group(2), m.group(3).strip()
-            # If c is already a literal (digits, hex, ether expression) leave it alone
-            if re.match(r'^[\d\.]+\s*(ether|wei|gwei)?$|^0x[0-9a-fA-F]+$', c):
+            # Already has uint128 cast — leave alone
+            if 'uint128' in c:
                 return m.group(0)
-            # If c already has a cast, leave it alone
-            if 'uint128' in c or 'uint256' not in c:
+            # Pure integer literal (no unit suffix) — implicitly convertible in Solidity
+            if re.match(r'^\d+$|^0x[0-9a-fA-F]+$', c):
                 return m.group(0)
+            # Everything else (ether/wei/gwei literals, uint256 vars, expressions) needs a cast
             return f'doAddLiquidity({a},{b}, uint128({c}))'
         source = re.sub(
             r'\bdoAddLiquidity\s*\(([^,)]+),([^,)]+),([^)]+)\)',
