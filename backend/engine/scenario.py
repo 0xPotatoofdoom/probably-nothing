@@ -682,6 +682,17 @@ class ScenarioProposer:
             return ''
         source = re.sub(r'//\s*SPDX-License-Identifier:[^\n]*\n?', _dedup_spdx, source)
 
+        # 0b. Replace hyphens in function/test names with underscores (Error 2314)
+        #     Solidity identifiers cannot contain hyphens; `test_Name-with-hyphen()` is invalid.
+        source = re.sub(
+            r'(function\s+\w+(?:-\w+)+)',
+            lambda m: m.group(0).replace('-', '_'),
+            source,
+        )
+
+        # 0c. Strip getPositionDetails(...)[n] — function doesn't exist in PNBase (Error 2614/7576)
+        source = re.sub(r'\bgetPositionDetails\s*\([^)]*\)\s*(?:\[\s*\d+\s*\])?', '/* getPositionDetails N/A */ 0', source)
+
         # 1. Replace Unicode punctuation that LLMs emit but Solidity strings can't contain
         source = (source
                   .replace('\u201c', '"').replace('\u201d', '"')   # " " curly double quotes
@@ -919,6 +930,28 @@ class ScenarioProposer:
         # 2q. Fix `byte(expr)` → `bytes1(uint8(expr))` (Error 6933)
         #     `byte` type was removed in Solidity 0.8+; replaced by `bytes1`.
         source = re.sub(r'\bbyte\(([^)]+)\)', r'bytes1(uint8(\1))', source)
+
+        # 2q2. Replace undeclared lowerTick/upperTick variables with safe defaults (Error 7576)
+        #      LLMs sometimes use these without declaring them; substitute standard tick values.
+        source = re.sub(r'\blowerTick\b', '-60', source)
+        source = re.sub(r'\bupperTick\b', '60', source)
+
+        # 2q3. Cast doAddLiquidity's 3rd arg to uint128 when it's a plain identifier (Error 9553)
+        #      The liquidity parameter is uint128; uint256 variables can't pass directly.
+        def _cast_addliq_arg(m: re.Match) -> str:
+            a, b, c = m.group(1), m.group(2), m.group(3).strip()
+            # If c is already a literal (digits, hex, ether expression) leave it alone
+            if re.match(r'^[\d\.]+\s*(ether|wei|gwei)?$|^0x[0-9a-fA-F]+$', c):
+                return m.group(0)
+            # If c already has a cast, leave it alone
+            if 'uint128' in c or 'uint256' not in c:
+                return m.group(0)
+            return f'doAddLiquidity({a},{b}, uint128({c}))'
+        source = re.sub(
+            r'\bdoAddLiquidity\s*\(([^,)]+),([^,)]+),([^)]+)\)',
+            _cast_addliq_arg,
+            source,
+        )
 
         # 2v. Replace deployCurrency() — not a PNBase helper (Error 7920)
         #     PNBase exposes currency0/currency1; deployCurrency() doesn't exist.
