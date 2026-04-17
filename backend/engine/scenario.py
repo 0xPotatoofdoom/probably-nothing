@@ -801,10 +801,12 @@ class ScenarioProposer:
             source,
         )
 
-        # 2g4. Rename `after` variable — reserved keyword in Solidity (Error 2314)
-        #      `after` was reserved for future use; LLMs use it as a gas snapshot variable.
+        # 2g4. Rename reserved keywords used as variable names (Error 2314)
+        #      `after` and `final` are reserved in Solidity; LLMs use them as variable names.
         source = re.sub(r'\b(uint(?:256|128)\s+)after\b', r'\1gasAfter', source)
         source = re.sub(r'\bafter\b(?=\s*[<>=;)&|,\n])', 'gasAfter', source)
+        source = re.sub(r'\b(uint(?:256|128)\s+)final\b', r'\1finalVal', source)
+        source = re.sub(r'\bfinal\b(?=\s*[<>=;)&|,\n])', 'finalVal', source)
 
         # 2h. Strip poolManager.getPool(...) — method doesn't exist (Error 9582/7364)
         #     LLMs write poolManager.getPool(poolKey).fee etc., or use tuple destructuring.
@@ -863,6 +865,8 @@ class ScenarioProposer:
             r'Currency.unwrap(\1)',
             source,
         )
+        # Also fix currency0.unwrap() — wrong call pattern; static form is Currency.unwrap(x) (Error 9582)
+        source = re.sub(r'\b(currency[01])\.unwrap\(\)', r'Currency.unwrap(\1)', source)
 
         # 2j3. Strip (void)expr; — C-style void cast not valid in Solidity (Error 2314)
         source = re.sub(r'\(void\)\s*[^;]+;', '', source)
