@@ -972,7 +972,7 @@ class ScenarioProposer:
             _seen_bd_vars.update([var1, var2])
             return f'BalanceDelta {tmp} = {fn_call}; {d1}{var1} = {tmp}.amount0(); {d2}{var2} = {tmp}.amount1();'
         source = re.sub(
-            r'\(\s*int128\s+(\w+)\s*,\s*int128\s+(\w+)\s*\)\s*=\s*(do\w+[^;]*)\s*;',
+            r'\(\s*(?:int128|uint128)\s+(\w+)\s*,\s*(?:int128|uint128)\s+(\w+)\s*\)\s*=\s*(do\w+[^;]*)\s*;',
             _expand_doswap_tuple,
             source,
         )

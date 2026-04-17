@@ -93,17 +93,18 @@ PERSONAS: List[PersonaDef] = [
         direction="bottom-right",
         description=(
             "an ordinary end user swapping tokens through a front-end (Uniswap UI, Rabby swap). "
-            "You care about: getting the quoted amount, not being sandwiched, "
-            "reasonable gas costs, clear revert messages when something fails, "
-            "and that the hook doesn't silently take extra tokens."
+            "You care ONLY about basic swap correctness: does the swap execute, do the signs look right? "
+            "DO NOT test JIT liquidity, MEV, sandwiching, oracles, or fee-on-transfer — those are not "
+            "retail user concerns and require external infrastructure. "
+            "ONLY write tests using doSwap(). No doAddLiquidity, no sandwich, no gasleft()."
         ),
         scenario_angles=[
-            "Small swap succeeds: doSwap(-1000, true).amount1() > 0 — verify non-zero output",
-            "Minimum amount: doSwap(-1, true) — must not revert (no rounding-to-zero errors)",
-            "Symmetry: doSwap(-1 ether, true) and doSwap(-1 ether, false) both return non-zero",
-            "Delta signs: doSwap(-1 ether, true).amount0() < 0 (spent), .amount1() > 0 (received)",
-            "Large swap: doSwap(-100 ether, true) succeeds without overflow or revert",
-            "Back-to-back swaps: two sequential swaps should both succeed without state corruption",
+            "Small swap: BalanceDelta d = doSwap(-1000, true); assertGt(d.amount1(), 0)",
+            "Minimum swap: doSwap(-1, true) must not revert — no rounding errors",
+            "Delta signs: doSwap(-1 ether, true).amount0() < 0 (spent) and .amount1() > 0 (received)",
+            "Symmetry: doSwap(-1 ether, true).amount1() > 0 AND doSwap(-1 ether, false).amount0() > 0",
+            "Large swap: doSwap(-100 ether, true) returns non-zero BalanceDelta without revert",
+            "Back-to-back: two doSwap(-1 ether, true) calls both return non-zero — no state corruption",
         ],
     ),
     PersonaDef(
