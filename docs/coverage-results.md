@@ -45,12 +45,16 @@
 
 ---
 
-## Scale-Up: 11 Scenarios/Persona (~99 attempts)
+## Scale-Up Attempts
 
-| Run | Seeded | Test Pass | Notes |
-|-----|--------|-----------|-------|
-| v100 (first attempt) | 22/99 (4/9 personas) | 80.7% (46/57) | Sequential seeding: deadline fired after 4 personas |
-| **v100b** | **18 (6/9 personas)** | **91.3% (63/69)** | **Parallel seeding + semaphore(3). bridge/security/gas still 0** |
+| Run | Target | Seeded | Test Pass | Notes |
+|-----|--------|--------|-----------|-------|
+| v100 (first) | 99 (11/persona) | 22 — 4/9 personas | 80.7% (46/57) | Sequential seeding: deadline fired after 4 personas |
+| **v100b** | **99 (11/persona)** | **18 — 6/9 personas** | **91.3% (63/69)** | **Parallel + semaphore(3). Best scale result.** |
+| v400 (1st attempt) | 396 (44/persona) | 0 | — | stream:False hung: no data → httpx read timeout never fired |
+| v400b | 396 (44/persona) | 7 — 2/9 personas | 94.1% (16/17) | Streaming fix worked but Ollama throughput limits scale |
+
+**Scale ceiling on local hardware:** qwen3-coder-next (61GB) generates ~2 scenarios per 90s call. Ollama serializes concurrent requests. At 44 scenarios/persona × 9 personas, full seeding would take 4-8+ hours. **v100b (11/persona, ~2 concurrent) is the practical ceiling.**
 
 **v100b persona breakdown:**
 
