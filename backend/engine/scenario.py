@@ -1005,8 +1005,12 @@ class ScenarioProposer:
                         depth += ln.count('(') - ln.count(')')
                     result.append('bool success = true; // positionManager.call N/A')
                 elif 'positionManager.' in ln:
-                    # Inline reference — replace the member access (Error 9582)
-                    result.append(re.sub(r'\bpositionManager\.\w+', '/* positionManager.fn N/A */ address(0)', ln))
+                    # Inline reference — replace method + its argument list with 0 (Error 9582/5704)
+                    # Must strip (args) too to avoid `address(0)(args)` which is non-callable.
+                    fixed_ln = re.sub(r'\bpositionManager\.\w+\s*\([^)]*\)', '/* positionManager.fn N/A */ 0', ln)
+                    # Also strip tuple-LHS = positionManager... assignments
+                    fixed_ln = re.sub(r'\([^)]*\)\s*=\s*/\*\s*positionManager[^;]*;', '/* positionManager tuple N/A */', fixed_ln)
+                    result.append(fixed_ln)
                 else:
                     result.append(ln)
                 i += 1
