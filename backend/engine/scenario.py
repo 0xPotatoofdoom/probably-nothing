@@ -806,9 +806,21 @@ class ScenarioProposer:
 
         # 2j3b. Fix `address var = /* stripped */ 0;` → address(0) (Error 9574)
         #       Stripped hook calls leave int_const 0 which can't assign to address type.
+        #       Use DOTALL so the pattern matches even when comment contains Unicode chars.
         source = re.sub(
-            r'(address\s+\w+\s*=\s*/\*[^\n]*?\*/\s*)0\s*;',
+            r'(address\s+\w+\s*=\s*/\*.*?\*/\s*)0\s*;',
             r'\1address(0);',
+            source,
+            flags=re.DOTALL,
+        )
+        # Broader catch-all: address var = 0; (without comment) also fails (Error 9574)
+        source = re.sub(r'\baddress(\s+\w+\s*=\s*)0\s*;', r'address\1address(0);', source)
+
+        # 2j3c. Fix address(Currency_var) → Currency.unwrap(var) (Error 9640)
+        #       Currency is a user-defined value type; can't cast to address directly.
+        source = re.sub(
+            r'\baddress\s*\(\s*(currency[01])\s*\)',
+            r'Currency.unwrap(\1)',
             source,
         )
 
@@ -915,6 +927,11 @@ class ScenarioProposer:
         # 2x. Strip `memory` from BalanceDelta declarations — BalanceDelta is a value type (Error 6651)
         #     User-defined value types cannot have data location specifiers.
         source = re.sub(r'\bBalanceDelta\s+memory\b', 'BalanceDelta', source)
+
+        # 2x4. Fix uint128(BalanceDelta_var) → BalanceDelta_var.amount0() (Error 9640)
+        #      Can't cast BalanceDelta directly to uint128; use .amount0()/.amount1() accessors.
+        source = re.sub(r'\buint128\s*\(\s*(\w+)\s*\)\.toUint128\(\)', r'\1.amount0()', source)
+        source = re.sub(r'\buint128\s*\(\s*(do\w+\s*\([^)]*\))\s*\)', r'\1.amount0()', source)
 
         # 2x2. Convert doSwap(amount, dir, hookData) → doSwapWithHookData(amount, dir, hookData) (Error 6160)
         #      Three-arg doSwap doesn't exist; the 3-arg form is doSwapWithHookData.
