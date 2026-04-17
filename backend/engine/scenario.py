@@ -990,6 +990,15 @@ class ScenarioProposer:
         source = re.sub(r'\blowerTick\b', '-60', source)
         source = re.sub(r'\bupperTick\b', '60', source)
 
+        # 2q2c. Fix int24(uint_var OP literal) — can't cast uint256 to int24 directly (Error 9640)
+        #       LLMs compute dynamic ticks as int24(i * 120) where i is uint256 loop var.
+        #       Insert int256() so the path is uint256 → int256 → int24.
+        source = re.sub(
+            r'\bint24\((\w+)\s*([+\-*/])\s*(\d+)\)',
+            r'int24(int256(\1) \2 \3)',
+            source,
+        )
+
         # 2q2b. Fix int_const * uint128(expr) in tick arithmetic — type mismatch (Error 2271)
         #       LLMs compute tick ranges as `-60 * uint128(i+1)` — int_const * uint128 is invalid.
         #       Convert uint128(expr) to int24(int256(expr)) so the multiplication works.
