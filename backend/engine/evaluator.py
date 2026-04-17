@@ -108,7 +108,8 @@ class HookEvaluator:
             all_persona_failures: Dict[str, List[str]] = {p.id: [] for p in PERSONAS}
 
             if proposer is not None and harness.mode == "foundry":
-                seed_timeout = min(240.0, max(30.0, deadline - time.monotonic() - 60))
+                _seed_timeout_cap = float(os.getenv("PN_SEED_TIMEOUT", "240"))
+                seed_timeout = min(_seed_timeout_cap, max(30.0, deadline - time.monotonic() - 60))
                 # Limit concurrency to avoid overwhelming a local LLM (Ollama serializes internally).
                 # 3 concurrent gives parallelism vs sequential without queue-starvation timeouts.
                 _seed_sem = asyncio.Semaphore(int(os.getenv("PN_SEED_CONCURRENCY", "3")))

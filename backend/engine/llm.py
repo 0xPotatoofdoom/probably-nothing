@@ -13,6 +13,7 @@ I/O off the event loop via httpx's async client.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Protocol, Optional
 
@@ -44,15 +45,25 @@ class OllamaLLM:
         payload = {
             "model": self.model,
             "prompt": prompt,
-            "stream": False,
+            "stream": True,
             "options": {"temperature": 0.4, "num_predict": 8192},
         }
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                r = await client.post(url, json=payload)
-                r.raise_for_status()
-                data = r.json()
-                return data.get("response")
+            async def _stream() -> str:
+                chunks = []
+                async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=60.0)) as client:
+                    async with client.stream("POST", url, json=payload) as r:
+                        r.raise_for_status()
+                        async for line in r.aiter_lines():
+                            if not line:
+                                continue
+                            import json as _json
+                            data = _json.loads(line)
+                            chunks.append(data.get("response", ""))
+                            if data.get("done"):
+                                break
+                return "".join(chunks)
+            return await asyncio.wait_for(_stream(), timeout=timeout)
         except Exception:
             return None
 

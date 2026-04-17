@@ -556,7 +556,7 @@ class ScenarioProposer:
             if budget < 15.0:
                 break
             sub_count = min(SUB_BATCH, remaining_count)
-            time_limit = budget * 0.65  # reserve 35% for fix attempts
+            time_limit = min(budget * 0.65, 90.0)  # cap per-call; streaming keeps conn alive
             prompt = self._build_prompt(hook_source, sub_count, recent_findings, skill_md, failed_examples)
             raw = await self.llm.complete(prompt, timeout=time_limit)
             if not raw:
@@ -1329,7 +1329,7 @@ class ScenarioProposer:
             if budget < 15.0:
                 break
             sub_count = min(SUB_BATCH, remaining_count)
-            time_limit = budget * 0.65
+            time_limit = min(budget * 0.65, 90.0)  # cap per-call; streaming keeps conn alive
             prompt = self._build_persona_prompt(
                 hook_source, persona, sub_count, recent_findings, skill_md, failed_examples
             )
